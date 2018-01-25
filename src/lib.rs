@@ -223,14 +223,16 @@ impl ImplicitFactorizationModel {
             let item_embeddings = &model.item_embedding;
             let item_biases = &model.item_biases;
 
-            let user_vector = user_embeddings.value.subview(Axis(0), user_id);
+            let user_embeddings = user_embeddings.value.borrow();
+            let user_vector = user_embeddings.subview(Axis(0), user_id);
             let user_vector_slice = user_vector.as_slice().unwrap();
 
             let predictions: Vec<f32> = item_embeddings
                 .value
+                .borrow()
                 .genrows()
                 .into_iter()
-                .zip(item_biases.value.as_slice().unwrap())
+                .zip(item_biases.value.borrow().as_slice().unwrap())
                 .map(|(item_embedding, item_bias)| {
                     item_bias
                         + wyrm::simd_dot(user_vector_slice, item_embedding.as_slice().unwrap())
@@ -358,7 +360,7 @@ impl ImplicitFactorizationModel {
                         loss_value += loss.value().scalar_sum();
 
                         optimizer.step();
-                        optimizer.zero_gradients();
+                        loss.zero_gradient();
                     }
                 }
 
