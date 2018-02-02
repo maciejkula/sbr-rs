@@ -27,8 +27,119 @@ use std::sync::Arc;
 
 use wyrm::{Arr, DataInput};
 
+pub struct Interactions {
+    num_users: usize,
+    num_items: usize,
+    user_ids: Vec<UserId>,
+    item_ids: Vec<ItemId>,
+    timestamps: Vec<Timestamp>,
+}
+
+impl Interactions {
+    pub fn new<T>(interactions: &[T]) -> Result<Self, &'static str>
+    where
+        T: Interaction,
+    {
+        if interactions.len() == 0 {
+            return Err("No interactions present.");
+        }
+
+        let num_users = interactions.iter().map(|x| x.user_id()).max().unwrap();
+        let num_items = interactions.iter().map(|x| x.item_id()).max().unwrap();
+
+        let user_ids = interactions.iter().map(|x| x.user_id()).collect();
+        let item_ids = interactions.iter().map(|x| x.item_id()).collect();
+        let timestamps = interactions.iter().map(|x| x.timestamp()).collect();
+
+        Ok(Interactions {
+            num_users: num_users,
+            num_items: num_items,
+            user_ids: user_ids,
+            item_ids: item_ids,
+            timestamps: timestamps,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.user_ids.len()
+    }
+
+    pub fn shuffle<R: Rng>(&mut self, rng: &mut R) {
+        let mut i = self.len();
+
+        while i >= 2 {
+            i -= 1;
+            let j = rng.gen_range(0, i + 1);
+
+            self.user_ids.swap(i, j);
+            self.item_ids.swap(i, j);
+            self.timestamps.swap(i, j);
+        }
+    }
+
+    pub fn split_at(&self, idx: usize) -> (Self, Self) {
+        let head = Interactions {
+            num_users: self.num_users,
+            num_items: self.num_items,
+            user_ids: self.user_ids[..idx].to_owned(),
+            item_ids: self.item_ids[..idx].to_owned(),
+            timestamps: self.timestamps[..idx].to_owned(),
+        };
+        let tail = Interactions {
+            num_users: self.num_users,
+            num_items: self.num_items,
+            user_ids: self.user_ids[idx..].to_owned(),
+            item_ids: self.item_ids[idx..].to_owned(),
+            timestamps: self.timestamps[idx..].to_owned(),
+        };
+
+        (head, tail)
+    }
+}
+
+impl<'a> IntoIterator for &'a Interactions {
+    type Item = UnweightedInteraction;
+    type IntoIter = InteractionsIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        InteractionsIterator {
+            interactions: self,
+            idx: 0
+        }
+    }
+        
+}
+
+pub struct InteractionsIterator<'a> {
+    interactions: &'a Interactions,
+    idx: usize,
+}
+
+impl<'a> Iterator for InteractionsIterator<'a> {
+    type Item = UnweightedInteraction;
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = if self.idx >= self.interactions.len() {
+            None
+        } else {
+            Some(UnweightedInteraction::new(
+                self.interactions.user_ids[self.idx],
+                self.interactions.item_ids[self.idx],
+                self.interactions.timestamps[self.idx],
+            ))
+        };
+
+        self.idx += 1;
+
+        value
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.interactions.len(), Some(self.interactions.len()))
+    }
+}
+
 pub type UserId = usize;
 pub type ItemId = usize;
+pub type Timestamp = usize;
 
 pub struct InteractionMatrix {
     num_users: usize,
@@ -122,6 +233,7 @@ fn get_dimensions<T: Interaction>(data: &[T]) -> (usize, usize) {
 pub trait Interaction: Sync + Clone {
     fn user_id(&self) -> UserId;
     fn item_id(&self) -> ItemId;
+    fn timestamp(&self) -> Timestamp;
     fn weight(&self) -> f32;
 }
 
@@ -129,11 +241,16 @@ pub trait Interaction: Sync + Clone {
 pub struct UnweightedInteraction {
     user_id: UserId,
     item_id: ItemId,
+    timestamp: Timestamp,
 }
 
 impl UnweightedInteraction {
-    pub fn new(user_id: UserId, item_id: ItemId) -> Self {
-        UnweightedInteraction { user_id, item_id }
+    pub fn new(user_id: UserId, item_id: ItemId, timestamp: Timestamp) -> Self {
+        UnweightedInteraction {
+            user_id,
+            item_id,
+            timestamp,
+        }
     }
 }
 
@@ -147,19 +264,19 @@ impl<'a> Interaction for UnweightedInteraction {
     fn weight(&self) -> f32 {
         1.0
     }
+    fn timestamp(&self) -> Timestamp {
+        self.timestamp
+    }
 }
 
 pub fn train_test_split<T: Interaction, R: Rng>(
-    interactions: &[T],
+    interactions: &mut Interactions,
     rng: &mut R,
     test_fraction: f32,
-) -> (Vec<T>, Vec<T>) {
-    let mut test: Vec<_> = interactions.to_vec();
-    rng.shuffle(&mut test[..]);
+) -> (Interactions, Interactions) {
+    interactions.shuffle(rng);
 
-    let train = test.split_off((test_fraction * interactions.len() as f32) as usize);
-
-    (train, test)
+    interactions.split_at((test_fraction * interactions.len() as f32) as usize)
 }
 
 fn embedding_init(rows: usize, cols: usize) -> wyrm::Arr {
@@ -266,19 +383,22 @@ impl ImplicitFactorizationModel {
         }
     }
 
-    pub fn fit<T: Interaction>(
+    pub fn fit(
         &mut self,
-        interactions: &[T],
+        interactions: &Interactions,
         num_epochs: usize,
     ) -> Result<f32, &'static str> {
-        let (num_users, num_items) = get_dimensions(interactions);
         let minibatch_size = self.hyper.minibatch_size;
 
         if self.model.is_none() {
-            self.model = Some(self.build_model(num_users, num_items, self.hyper.latent_dim));
+            self.model = Some(self.build_model(
+                interactions.num_users,
+                interactions.num_items,
+                self.hyper.latent_dim,
+            ));
         }
 
-        let negative_item_range = Range::new(0, num_items);
+        let negative_item_range = Range::new(0, interactions.num_items);
 
         let num_partitions = rayon::current_num_threads();
         let chunk_size = interactions.len() / num_partitions;
@@ -292,9 +412,8 @@ impl ImplicitFactorizationModel {
                 let item_embeddings = wyrm::ParameterNode::shared(
                     self.model.as_ref().unwrap().item_embedding.clone(),
                 );
-                let item_biases = wyrm::ParameterNode::shared(
-                    self.model.as_ref().unwrap().item_biases.clone(),
-                );
+                let item_biases =
+                    wyrm::ParameterNode::shared(self.model.as_ref().unwrap().item_biases.clone());
 
                 let user_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
                 let positive_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
@@ -323,8 +442,6 @@ impl ImplicitFactorizationModel {
                     ],
                 );
 
-                let mut batch_uids = vec![0; minibatch_size];
-                let mut batch_positives = vec![0; minibatch_size];
                 let mut batch_negatives = vec![0; minibatch_size];
 
                 let mut rng = rand::XorShiftRng::from_seed(thread_rng().gen());
@@ -334,24 +451,20 @@ impl ImplicitFactorizationModel {
                 let mut loss_value = 0.0;
 
                 for _ in 0..num_epochs {
-                    for interaction in interactions[start..stop].chunks(minibatch_size) {
-                        if interaction.len() < minibatch_size {
+                    for (user_ids, item_ids) in izip!(
+                        interactions.user_ids.chunks(minibatch_size),
+                        interactions.item_ids.chunks(minibatch_size)
+                    ) {
+                        if user_ids.len() < minibatch_size {
                             break;
                         }
 
-                        for (uid, p_iid, n_iid, datum) in izip!(
-                            batch_uids.iter_mut(),
-                            batch_positives.iter_mut(),
-                            batch_negatives.iter_mut(),
-                            interaction
-                        ) {
-                            *uid = datum.user_id();
-                            *p_iid = datum.item_id();
-                            *n_iid = negative_item_range.ind_sample(&mut rng);
+                        for negative in batch_negatives.iter_mut() {
+                            *negative = negative_item_range.ind_sample(&mut rng);
                         }
 
-                        user_idx.set_value(batch_uids.as_slice());
-                        positive_item_idx.set_value(batch_positives.as_slice());
+                        user_idx.set_value(user_ids);
+                        positive_item_idx.set_value(item_ids);
                         negative_item_idx.set_value(batch_negatives.as_slice());
 
                         loss.forward();
@@ -378,16 +491,20 @@ mod tests {
     use super::*;
     use test::Bencher;
 
-    fn load_movielens(path: &str) -> Vec<UnweightedInteraction> {
+    fn load_movielens(path: &str) -> Interactions {
         let mut reader = csv::Reader::from_path(path).unwrap();
-        reader.deserialize().map(|x| x.unwrap()).collect()
+        let interactions: Vec<UnweightedInteraction> =
+            reader.deserialize().map(|x| x.unwrap()).collect();
+
+        Interactions::new(&interactions).unwrap()
     }
 
     #[test]
     fn it_works() {
-        let data = load_movielens("data.csv");
+        let mut data = load_movielens("data.csv");
 
-        let (train, test) = train_test_split(&data, &mut rand::XorShiftRng::new_unseeded(), 0.2);
+        let (train, test) =
+            train_test_split(&mut data, &mut rand::XorShiftRng::new_unseeded(), 0.2);
 
         println!("Train: {}, test: {}", train.len(), test.len());
 
