@@ -18,6 +18,8 @@ extern crate test;
 
 extern crate wyrm;
 
+use std::cmp::Ordering;
+
 use ndarray::Axis;
 
 use rayon::prelude::*;
@@ -27,113 +29,69 @@ use std::sync::Arc;
 
 use wyrm::{Arr, DataInput};
 
+mod data;
+
 pub struct Interactions {
     num_users: usize,
     num_items: usize,
-    user_ids: Vec<UserId>,
-    item_ids: Vec<ItemId>,
-    timestamps: Vec<Timestamp>,
+    interactions: Vec<Interaction>,
 }
 
 impl Interactions {
-    pub fn new<T>(interactions: &[T]) -> Result<Self, &'static str>
-    where
-        T: Interaction,
-    {
-        if interactions.len() == 0 {
-            return Err("No interactions present.");
-        }
-
-        let num_users = interactions.iter().map(|x| x.user_id()).max().unwrap();
-        let num_items = interactions.iter().map(|x| x.item_id()).max().unwrap();
-
-        let user_ids = interactions.iter().map(|x| x.user_id()).collect();
-        let item_ids = interactions.iter().map(|x| x.item_id()).collect();
-        let timestamps = interactions.iter().map(|x| x.timestamp()).collect();
-
-        Ok(Interactions {
+    pub fn new(num_users: usize, num_items: usize) -> Self {
+        Interactions {
             num_users: num_users,
             num_items: num_items,
-            user_ids: user_ids,
-            item_ids: item_ids,
-            timestamps: timestamps,
-        })
+            interactions: Vec::new(),
+        }
+    }
+
+    pub fn data(&self) -> &[Interaction] {
+        &self.interactions
     }
 
     pub fn len(&self) -> usize {
-        self.user_ids.len()
+        self.interactions.len()
     }
 
     pub fn shuffle<R: Rng>(&mut self, rng: &mut R) {
-        let mut i = self.len();
-
-        while i >= 2 {
-            i -= 1;
-            let j = rng.gen_range(0, i + 1);
-
-            self.user_ids.swap(i, j);
-            self.item_ids.swap(i, j);
-            self.timestamps.swap(i, j);
-        }
+        rng.shuffle(&mut self.interactions);
     }
 
     pub fn split_at(&self, idx: usize) -> (Self, Self) {
         let head = Interactions {
             num_users: self.num_users,
             num_items: self.num_items,
-            user_ids: self.user_ids[..idx].to_owned(),
-            item_ids: self.item_ids[..idx].to_owned(),
-            timestamps: self.timestamps[..idx].to_owned(),
+            interactions: self.interactions[..idx].to_owned(),
         };
         let tail = Interactions {
             num_users: self.num_users,
             num_items: self.num_items,
-            user_ids: self.user_ids[idx..].to_owned(),
-            item_ids: self.item_ids[idx..].to_owned(),
-            timestamps: self.timestamps[idx..].to_owned(),
+            interactions: self.interactions[idx..].to_owned(),
         };
 
         (head, tail)
     }
+
+    pub fn to_triplet(&self) -> TripletInteractions {
+        TripletInteractions::from(self)
+    }
+
+    pub fn to_compressed(&self) -> CompressedInteractions {
+        CompressedInteractions::from(self)
+    }
 }
 
-impl<'a> IntoIterator for &'a Interactions {
-    type Item = UnweightedInteraction;
-    type IntoIter = InteractionsIterator<'a>;
+impl From<Vec<Interaction>> for Interactions {
+    fn from(data: Vec<Interaction>) -> Interactions {
+        let num_users = data.iter().map(|x| x.user_id()).max().unwrap() + 1;
+        let num_items = data.iter().map(|x| x.item_id()).max().unwrap() + 1;
 
-    fn into_iter(self) -> Self::IntoIter {
-        InteractionsIterator {
-            interactions: self,
-            idx: 0
+        Interactions {
+            num_users: num_users,
+            num_items: num_items,
+            interactions: data,
         }
-    }
-        
-}
-
-pub struct InteractionsIterator<'a> {
-    interactions: &'a Interactions,
-    idx: usize,
-}
-
-impl<'a> Iterator for InteractionsIterator<'a> {
-    type Item = UnweightedInteraction;
-    fn next(&mut self) -> Option<Self::Item> {
-        let value = if self.idx >= self.interactions.len() {
-            None
-        } else {
-            Some(UnweightedInteraction::new(
-                self.interactions.user_ids[self.idx],
-                self.interactions.item_ids[self.idx],
-                self.interactions.timestamps[self.idx],
-            ))
-        };
-
-        self.idx += 1;
-
-        value
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.interactions.len(), Some(self.interactions.len()))
     }
 }
 
@@ -141,72 +99,219 @@ pub type UserId = usize;
 pub type ItemId = usize;
 pub type Timestamp = usize;
 
-pub struct InteractionMatrix {
+pub struct CompressedInteractions {
     num_users: usize,
     num_items: usize,
-    rows: Vec<Vec<usize>>,
+    user_pointers: Vec<usize>,
+    item_ids: Vec<ItemId>,
+    timestamps: Vec<Timestamp>,
 }
 
-impl InteractionMatrix {
-    pub fn new(num_users: usize, num_items: usize) -> Self {
-        InteractionMatrix {
-            num_users: num_users,
-            num_items: num_items,
-            rows: vec![Vec::new(); num_users],
+fn cmp_timestamp(x: &Interaction, y: &Interaction) -> Ordering {
+    let uid_comparison = x.user_id().cmp(&y.user_id());
+
+    if uid_comparison == Ordering::Equal {
+        x.timestamp().cmp(&y.timestamp())
+    } else {
+        uid_comparison
+    }
+}
+
+impl<'a> From<&'a Interactions> for CompressedInteractions {
+    fn from(interactions: &Interactions) -> CompressedInteractions {
+        let mut data = interactions.data().to_owned();
+
+        data.sort_by(cmp_timestamp);
+
+        let mut user_pointers = vec![0; interactions.num_users + 1];
+        let mut item_ids = Vec::with_capacity(data.len());
+        let mut timestamps = Vec::with_capacity(data.len());
+
+        for datum in &data {
+            item_ids.push(datum.item_id());
+            timestamps.push(datum.timestamp());
+
+            user_pointers[datum.user_id() + 1] += 1;
+        }
+
+        for idx in 1..user_pointers.len() {
+            user_pointers[idx] += user_pointers[idx - 1];
+        }
+
+        CompressedInteractions {
+            num_users: interactions.num_users,
+            num_items: interactions.num_items,
+            user_pointers: user_pointers,
+            item_ids: item_ids,
+            timestamps: timestamps,
         }
     }
-    pub fn rows(&self) -> &[Vec<ItemId>] {
-        &self.rows
+}
+
+impl CompressedInteractions {
+    pub fn iter_users(&self) -> CompressedInteractionsUserIterator {
+        CompressedInteractionsUserIterator {
+            interactions: &self,
+            idx: 0,
+        }
     }
-    pub fn from_interactions<T: Interaction>(
-        num_users: usize,
-        num_items: usize,
-        interactions: &[T],
-    ) -> Self {
-        let mut mat = InteractionMatrix {
-            num_users: num_users,
-            num_items: num_items,
-            rows: vec![Vec::new(); num_users],
+
+    pub fn get_user(&self, user_id: UserId) -> Option<CompressedInteractionsUser> {
+        if user_id >= self.num_users {
+            return None;
+        }
+
+        let start = self.user_pointers[user_id];
+        let stop = self.user_pointers[user_id + 1];
+
+        Some(CompressedInteractionsUser {
+            user_id: user_id,
+            item_ids: &self.item_ids[start..stop],
+            timestamps: &self.timestamps[start..stop],
+        })
+    }
+}
+
+pub struct CompressedInteractionsUserIterator<'a> {
+    interactions: &'a CompressedInteractions,
+    idx: usize,
+}
+
+#[derive(Debug)]
+pub struct CompressedInteractionsUser<'a> {
+    pub user_id: UserId,
+    pub item_ids: &'a [ItemId],
+    pub timestamps: &'a [Timestamp],
+}
+
+impl<'a> Iterator for CompressedInteractionsUserIterator<'a> {
+    type Item = CompressedInteractionsUser<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = if self.idx >= self.interactions.num_users {
+            None
+        } else {
+            let start = self.interactions.user_pointers[self.idx];
+            let stop = self.interactions.user_pointers[self.idx + 1];
+
+            Some(CompressedInteractionsUser {
+                user_id: self.idx,
+                item_ids: &self.interactions.item_ids[start..stop],
+                timestamps: &self.interactions.timestamps[start..stop],
+            })
         };
 
-        for elem in interactions {
-            mat.add(elem.user_id(), elem.item_id());
-        }
+        self.idx += 1;
 
-        mat
+        value
     }
-    pub fn add(&mut self, user_id: UserId, item_id: ItemId) {
-        if let Err(idx) = self.rows[user_id].binary_search(&item_id) {
-            self.rows[user_id].insert(idx, item_id);
+}
+
+pub struct TripletInteractions {
+    num_users: usize,
+    num_items: usize,
+    user_ids: Vec<UserId>,
+    item_ids: Vec<ItemId>,
+    timestamps: Vec<Timestamp>,
+}
+
+impl TripletInteractions {
+    pub fn len(&self) -> usize {
+        self.user_ids.len()
+    }
+    pub fn iter_minibatch(&self, minibatch_size: usize) -> TripletMinibatchIterator {
+        TripletMinibatchIterator {
+            interactions: &self,
+            idx: 0,
+            minibatch_size: minibatch_size,
         }
     }
-    pub fn get(&self, user_id: UserId) -> &[ItemId] {
-        &self.rows[user_id]
+}
+
+pub struct TripletMinibatchIterator<'a> {
+    interactions: &'a TripletInteractions,
+    idx: usize,
+    minibatch_size: usize,
+}
+
+#[derive(Debug)]
+pub struct TripletMinibatch<'a> {
+    pub user_ids: &'a [UserId],
+    pub item_ids: &'a [ItemId],
+    pub timestamps: &'a [Timestamp],
+}
+
+impl<'a> TripletMinibatch<'a> {
+    pub fn len(&self) -> usize {
+        self.user_ids.len()
+    }
+}
+
+impl<'a> Iterator for TripletMinibatchIterator<'a> {
+    type Item = TripletMinibatch<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = if self.idx + self.minibatch_size > self.interactions.len() {
+            None
+        } else {
+            let start = self.idx;
+            let stop = self.idx + self.minibatch_size;
+
+            Some(TripletMinibatch {
+                user_ids: &self.interactions.user_ids[start..stop],
+                item_ids: &self.interactions.item_ids[start..stop],
+                timestamps: &self.interactions.timestamps[start..stop],
+            })
+        };
+
+        self.idx += self.minibatch_size;
+
+        value
+    }
+}
+
+impl<'a> From<&'a Interactions> for TripletInteractions {
+    fn from(interactions: &'a Interactions) -> Self {
+        let user_ids = interactions.data().iter().map(|x| x.user_id()).collect();
+        let item_ids = interactions.data().iter().map(|x| x.item_id()).collect();
+        let timestamps = interactions.data().iter().map(|x| x.timestamp()).collect();
+
+        TripletInteractions {
+            num_users: interactions.num_users,
+            num_items: interactions.num_items,
+            user_ids: user_ids,
+            item_ids: item_ids,
+            timestamps: timestamps,
+        }
     }
 }
 
 pub fn mrr_score(
     model: &ImplicitFactorizationModel,
-    test: &InteractionMatrix,
-    train: &InteractionMatrix,
-) -> f32 {
-    let mrrs: Vec<f32> = test.rows()
-        .par_iter()
-        .zip(train.rows())
-        .enumerate()
-        .filter_map(|(user_id, (test_row, train_row))| {
-            if test_row.len() == 0 {
+    test: &CompressedInteractions,
+    train: &CompressedInteractions,
+) -> Result<f32, &'static str> {
+    if test.num_users != train.num_users || test.num_items != train.num_items {
+        return Err("Number of users or items in train and test sets don't match");
+    }
+
+    let mrrs: Vec<f32> = test.iter_users()
+        .zip(train.iter_users())
+        .filter_map(|(test_user, train_user)| {
+            if test_user.item_ids.len() == 0 {
                 return None;
             }
 
-            let mut predictions = model.predict(user_id).unwrap();
+            let mut predictions = model.predict(test_user.user_id).unwrap();
 
-            for &train_idx in train_row.iter() {
-                predictions[train_idx] = std::f32::MIN;
+            for &train_item_id in train_user.item_ids.iter() {
+                predictions[train_item_id] = std::f32::MIN;
             }
 
-            let test_scores: Vec<f32> = test_row.iter().map(|&idx| predictions[idx]).collect();
-            let mut ranks: Vec<usize> = vec![0; test_row.len()];
+            let test_scores: Vec<f32> = test_user
+                .item_ids
+                .iter()
+                .map(|&idx| predictions[idx])
+                .collect();
+            let mut ranks: Vec<usize> = vec![0; test_user.item_ids.len()];
 
             for &prediction in &predictions {
                 for (rank, &score) in ranks.iter_mut().zip(&test_scores) {
@@ -220,33 +325,19 @@ pub fn mrr_score(
         })
         .collect();
 
-    mrrs.iter().sum::<f32>() / mrrs.len() as f32
-}
-
-fn get_dimensions<T: Interaction>(data: &[T]) -> (usize, usize) {
-    let max_user = data.iter().map(|x| x.user_id()).max().unwrap() + 1;
-    let max_item = data.iter().map(|x| x.item_id()).max().unwrap() + 1;
-
-    (max_user, max_item)
-}
-
-pub trait Interaction: Sync + Clone {
-    fn user_id(&self) -> UserId;
-    fn item_id(&self) -> ItemId;
-    fn timestamp(&self) -> Timestamp;
-    fn weight(&self) -> f32;
+    Ok(mrrs.iter().sum::<f32>() / mrrs.len() as f32)
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct UnweightedInteraction {
+pub struct Interaction {
     user_id: UserId,
     item_id: ItemId,
     timestamp: Timestamp,
 }
 
-impl UnweightedInteraction {
+impl Interaction {
     pub fn new(user_id: UserId, item_id: ItemId, timestamp: Timestamp) -> Self {
-        UnweightedInteraction {
+        Interaction {
             user_id,
             item_id,
             timestamp,
@@ -254,7 +345,7 @@ impl UnweightedInteraction {
     }
 }
 
-impl<'a> Interaction for UnweightedInteraction {
+impl Interaction {
     fn user_id(&self) -> UserId {
         self.user_id
     }
@@ -269,14 +360,16 @@ impl<'a> Interaction for UnweightedInteraction {
     }
 }
 
-pub fn train_test_split<T: Interaction, R: Rng>(
+pub fn train_test_split<R: Rng>(
     interactions: &mut Interactions,
     rng: &mut R,
     test_fraction: f32,
 ) -> (Interactions, Interactions) {
     interactions.shuffle(rng);
 
-    interactions.split_at((test_fraction * interactions.len() as f32) as usize)
+    let (test, train) = interactions.split_at((test_fraction * interactions.len() as f32) as usize);
+
+    (train, test)
 }
 
 fn embedding_init(rows: usize, cols: usize) -> wyrm::Arr {
@@ -385,7 +478,7 @@ impl ImplicitFactorizationModel {
 
     pub fn fit(
         &mut self,
-        interactions: &Interactions,
+        interactions: &TripletInteractions,
         num_epochs: usize,
     ) -> Result<f32, &'static str> {
         let minibatch_size = self.hyper.minibatch_size;
@@ -400,10 +493,11 @@ impl ImplicitFactorizationModel {
 
         let negative_item_range = Range::new(0, interactions.num_items);
 
-        let num_partitions = rayon::current_num_threads();
+        //let num_partitions = rayon::current_num_threads();
+        let num_partitions = 1;
         let chunk_size = interactions.len() / num_partitions;
 
-        let losses: Vec<f32> = (0..rayon::current_num_threads())
+        let losses: Vec<f32> = (0..num_partitions)
             .into_par_iter()
             .map(|partition_idx| {
                 let user_embeddings = wyrm::ParameterNode::shared(
@@ -451,11 +545,8 @@ impl ImplicitFactorizationModel {
                 let mut loss_value = 0.0;
 
                 for _ in 0..num_epochs {
-                    for (user_ids, item_ids) in izip!(
-                        interactions.user_ids.chunks(minibatch_size),
-                        interactions.item_ids.chunks(minibatch_size)
-                    ) {
-                        if user_ids.len() < minibatch_size {
+                    for batch in interactions.iter_minibatch(minibatch_size) {
+                        if batch.len() < minibatch_size {
                             break;
                         }
 
@@ -463,8 +554,8 @@ impl ImplicitFactorizationModel {
                             *negative = negative_item_range.ind_sample(&mut rng);
                         }
 
-                        user_idx.set_value(user_ids);
-                        positive_item_idx.set_value(item_ids);
+                        user_idx.set_value(batch.user_ids);
+                        positive_item_idx.set_value(batch.item_ids);
                         negative_item_idx.set_value(batch_negatives.as_slice());
 
                         loss.forward();
@@ -493,10 +584,9 @@ mod tests {
 
     fn load_movielens(path: &str) -> Interactions {
         let mut reader = csv::Reader::from_path(path).unwrap();
-        let interactions: Vec<UnweightedInteraction> =
-            reader.deserialize().map(|x| x.unwrap()).collect();
+        let interactions: Vec<Interaction> = reader.deserialize().map(|x| x.unwrap()).collect();
 
-        Interactions::new(&interactions).unwrap()
+        Interactions::from(interactions)
     }
 
     #[test]
@@ -517,20 +607,16 @@ mod tests {
         let num_epochs = 50;
 
         let mut model = ImplicitFactorizationModel::new(hyper);
-        println!("Loss: {}", model.fit(&train, num_epochs).unwrap());
 
-        let train_mat = InteractionMatrix::from_interactions(
-            model.num_users().unwrap(),
-            model.num_items().unwrap(),
-            &train,
-        );
-        let test_mat = InteractionMatrix::from_interactions(
-            model.num_users().unwrap(),
-            model.num_items().unwrap(),
-            &test,
+        println!(
+            "Loss: {}",
+            model.fit(&train.to_triplet(), num_epochs).unwrap()
         );
 
-        let mrr = mrr_score(&model, &test_mat, &train_mat);
+        let train_mat = train.to_compressed();
+        let test_mat = test.to_compressed();
+
+        let mrr = mrr_score(&model, &test_mat, &train_mat).unwrap();
 
         println!("MRR {}", mrr);
 
@@ -543,6 +629,8 @@ mod tests {
         let num_epochs = 2;
 
         let mut model = ImplicitFactorizationModel::default();
+
+        let data = data.to_triplet();
 
         model.fit(&data, num_epochs).unwrap();
 
