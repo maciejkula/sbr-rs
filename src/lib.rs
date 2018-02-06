@@ -206,6 +206,7 @@ impl<'a> Iterator for CompressedInteractionsUserIterator<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct TripletInteractions {
     num_users: usize,
     num_items: usize,
@@ -222,15 +223,41 @@ impl TripletInteractions {
         TripletMinibatchIterator {
             interactions: &self,
             idx: 0,
+            stop_idx: self.len(),
             minibatch_size: minibatch_size,
         }
     }
+    pub fn iter_minibatch_partitioned(
+        &self,
+        minibatch_size: usize,
+        num_partitions: usize,
+    ) -> Vec<TripletMinibatchIterator> {
+        let iterator = self.iter_minibatch(minibatch_size);
+        let chunk_size = self.len() / num_partitions;
+
+        (0..num_partitions)
+            .map(|x| iterator.slice(x * chunk_size, (x + 1) * chunk_size))
+            .collect()
+    }
 }
 
+#[derive(Clone, Debug)]
 pub struct TripletMinibatchIterator<'a> {
     interactions: &'a TripletInteractions,
     idx: usize,
+    stop_idx: usize,
     minibatch_size: usize,
+}
+
+impl<'a> TripletMinibatchIterator<'a> {
+    pub fn slice(&self, start: usize, stop: usize) -> TripletMinibatchIterator<'a> {
+        TripletMinibatchIterator {
+            interactions: &self.interactions,
+            idx: start,
+            stop_idx: stop,
+            minibatch_size: self.minibatch_size,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -249,7 +276,7 @@ impl<'a> TripletMinibatch<'a> {
 impl<'a> Iterator for TripletMinibatchIterator<'a> {
     type Item = TripletMinibatch<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        let value = if self.idx + self.minibatch_size > self.interactions.len() {
+        let value = if self.idx + self.minibatch_size > self.stop_idx {
             None
         } else {
             let start = self.idx;
@@ -493,13 +520,12 @@ impl ImplicitFactorizationModel {
 
         let negative_item_range = Range::new(0, interactions.num_items);
 
-        //let num_partitions = rayon::current_num_threads();
-        let num_partitions = 1;
-        let chunk_size = interactions.len() / num_partitions;
+        let num_partitions = rayon::current_num_threads();
 
-        let losses: Vec<f32> = (0..num_partitions)
+        let losses: Vec<f32> = interactions
+            .iter_minibatch_partitioned(minibatch_size, num_partitions)
             .into_par_iter()
-            .map(|partition_idx| {
+            .map(|data| {
                 let user_embeddings = wyrm::ParameterNode::shared(
                     self.model.as_ref().unwrap().user_embedding.clone(),
                 );
@@ -527,28 +553,22 @@ impl ImplicitFactorizationModel {
                 let score_diff = positive_prediction - negative_prediciton;
                 let mut loss = -score_diff.sigmoid();
 
-                let mut optimizer = wyrm::SGD::new(
-                    self.hyper.learning_rate,
-                    vec![
-                        user_embeddings.clone(),
-                        item_embeddings.clone(),
-                        item_biases.clone(),
-                    ],
-                );
+                let mut optimizer = wyrm::Adagrad::new(self.hyper.learning_rate, loss.parameters());
 
                 let mut batch_negatives = vec![0; minibatch_size];
 
                 let mut rng = rand::XorShiftRng::from_seed(thread_rng().gen());
-                let start = partition_idx * chunk_size;
-                let stop = start + chunk_size;
-
                 let mut loss_value = 0.0;
 
+                let mut num_observations = 0;
+
                 for _ in 0..num_epochs {
-                    for batch in interactions.iter_minibatch(minibatch_size) {
+                    for batch in data.clone() {
                         if batch.len() < minibatch_size {
                             break;
                         }
+
+                        num_observations += batch.len();
 
                         for negative in batch_negatives.iter_mut() {
                             *negative = negative_item_range.ind_sample(&mut rng);
@@ -568,7 +588,7 @@ impl ImplicitFactorizationModel {
                     }
                 }
 
-                loss_value / (num_epochs * (stop - start)) as f32
+                loss_value / num_observations as f32
             })
             .collect();
 
@@ -599,7 +619,7 @@ mod tests {
         println!("Train: {}, test: {}", train.len(), test.len());
 
         let hyper = HyperparametersBuilder::default()
-            .learning_rate(0.1)
+            .learning_rate(0.5)
             .latent_dim(32)
             .build()
             .unwrap();
