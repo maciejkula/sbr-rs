@@ -14,8 +14,8 @@ extern crate ndarray;
 extern crate rand;
 extern crate rayon;
 extern crate serde;
+extern crate siphasher;
 extern crate test;
-
 extern crate wyrm;
 
 use std::cmp::Ordering;
@@ -26,6 +26,9 @@ use rayon::prelude::*;
 use rand::distributions::{IndependentSample, Range};
 use rand::{thread_rng, Rng, SeedableRng};
 use std::sync::Arc;
+use std::hash::Hasher;
+
+use siphasher::sip::SipHasher;
 
 use wyrm::{Arr, DataInput};
 
@@ -58,7 +61,7 @@ impl Interactions {
         rng.shuffle(&mut self.interactions);
     }
 
-    pub fn split_at(&self, idx: usize) -> (Self, Self) {
+    fn split_at(&self, idx: usize) -> (Self, Self) {
         let head = Interactions {
             num_users: self.num_users,
             num_items: self.num_items,
@@ -68,6 +71,29 @@ impl Interactions {
             num_users: self.num_users,
             num_items: self.num_items,
             interactions: self.interactions[idx..].to_owned(),
+        };
+
+        (head, tail)
+    }
+
+    fn split_by<F: Fn(&Interaction) -> bool>(&self, func: F) -> (Self, Self) {
+        let head = Interactions {
+            num_users: self.num_users,
+            num_items: self.num_items,
+            interactions: self.interactions
+                .iter()
+                .filter(|x| func(x))
+                .cloned()
+                .collect(),
+        };
+        let tail = Interactions {
+            num_users: self.num_users,
+            num_items: self.num_items,
+            interactions: self.interactions
+                .iter()
+                .filter(|x| !func(x))
+                .cloned()
+                .collect(),
         };
 
         (head, tail)
@@ -397,6 +423,27 @@ pub fn train_test_split<R: Rng>(
     let (test, train) = interactions.split_at((test_fraction * interactions.len() as f32) as usize);
 
     (train, test)
+}
+
+pub fn user_based_split<R: Rng>(
+    interactions: &mut Interactions,
+    rng: &mut R,
+    test_fraction: f32,
+) -> (Interactions, Interactions) {
+    let denominator = 100000;
+    let train_cutoff = (test_fraction * denominator as f32) as u64;
+
+    let range = Range::new(0, std::u64::MAX);
+    let (key_0, key_1) = (range.ind_sample(rng), range.ind_sample(rng));
+
+    let is_train = |x: &Interaction| {
+        let mut hasher = SipHasher::new_with_keys(key_0, key_1);
+        let user_id = x.user_id();
+        hasher.write_usize(user_id);
+        hasher.finish() % denominator > train_cutoff
+    };
+
+    interactions.split_by(is_train)
 }
 
 fn embedding_init(rows: usize, cols: usize) -> wyrm::Arr {

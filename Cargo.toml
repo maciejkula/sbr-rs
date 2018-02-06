@@ -13,6 +13,7 @@ itertools = "0.7.3"
 rayon = "0.9.0"
 ndarray = { version = "0.11.0", features = ["serde-1"] }
 derive_builder = "0.5.1"
+siphasher = "0.2.2"
 
 wyrm = { path = "../wyrm" }
 
