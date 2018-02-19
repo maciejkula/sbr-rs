@@ -381,6 +381,45 @@ pub fn mrr_score(
     Ok(mrrs.iter().sum::<f32>() / mrrs.len() as f32)
 }
 
+pub fn fold_in_mrr_score(
+    model: &ImplicitFactorizationModel,
+    test: &CompressedInteractions,
+) -> Result<f32, &'static str> {
+    let mrrs: Vec<f32> = test.iter_users()
+        .filter_map(|test_user| {
+            if test_user.item_ids.len() == 0 {
+                return None;
+            }
+
+            let train_items = &test_user.item_ids[..test_user.item_ids.len() - 1];
+            let test_item = *test_user.item_ids.last().unwrap();
+
+            let user_embedding = model.fold_in_user(train_items).unwrap();
+
+            let mut predictions = model.predict_user(&user_embedding).unwrap();
+
+            for &train_item_id in train_items {
+                predictions[train_item_id] = std::f32::MIN;
+            }
+
+            let test_scores = vec![predictions[test_item]];
+            let mut ranks: Vec<usize> = vec![0];
+
+            for &prediction in &predictions {
+                for (rank, &score) in ranks.iter_mut().zip(&test_scores) {
+                    if prediction >= score {
+                        *rank += 1;
+                    }
+                }
+            }
+
+            Some(ranks.iter().map(|&x| 1.0 / x as f32).sum::<f32>() / ranks.len() as f32)
+        })
+        .collect();
+
+    Ok(mrrs.iter().sum::<f32>() / mrrs.len() as f32)
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Interaction {
     user_id: UserId,
@@ -452,9 +491,14 @@ fn embedding_init(rows: usize, cols: usize) -> wyrm::Arr {
 
 #[derive(Builder)]
 pub struct Hyperparameters {
-    #[builder(default = "16")] latent_dim: usize,
-    #[builder(default = "10")] minibatch_size: usize,
-    #[builder(default = "0.01")] learning_rate: f32,
+    #[builder(default = "16")]
+    latent_dim: usize,
+    #[builder(default = "10")]
+    minibatch_size: usize,
+    #[builder(default = "0.01")]
+    learning_rate: f32,
+    #[builder(default = "50")]
+    fold_in_epochs: usize,
 }
 
 struct ModelData {
@@ -529,6 +573,28 @@ impl ImplicitFactorizationModel {
         }
     }
 
+    pub fn predict_user(&self, user_embedding: &[f32]) -> Result<Vec<f32>, &'static str> {
+        if let Some(ref model) = self.model {
+            let item_embeddings = &model.item_embedding;
+            let item_biases = &model.item_biases;
+
+            let predictions: Vec<f32> = item_embeddings
+                .value
+                .borrow()
+                .genrows()
+                .into_iter()
+                .zip(item_biases.value.borrow().as_slice().unwrap())
+                .map(|(item_embedding, item_bias)| {
+                    item_bias + wyrm::simd_dot(user_embedding, item_embedding.as_slice().unwrap())
+                })
+                .collect();
+
+            Ok(predictions)
+        } else {
+            Err("Model must be fitted first.")
+        }
+    }
+
     fn build_model(&self, num_users: usize, num_items: usize, latent_dim: usize) -> ModelData {
         let user_embeddings = Arc::new(wyrm::HogwildParameter::new(embedding_init(
             num_users,
@@ -548,6 +614,59 @@ impl ImplicitFactorizationModel {
             item_embedding: item_embeddings,
             item_biases: item_biases,
         }
+    }
+
+    pub fn fold_in_user(&self, interactions: &[ItemId]) -> Result<Vec<f32>, &'static str> {
+        if self.model.is_none() {
+            return Err("Model must be fitted before trying to fold-in users.");
+        }
+
+        let negative_item_range = Range::new(0, self.model.as_ref().unwrap().num_items);
+        let minibatch_size = 1;
+
+        let user_vector = wyrm::ParameterNode::new(embedding_init(1, self.hyper.latent_dim));
+
+        let item_embeddings =
+            wyrm::ParameterNode::shared(self.model.as_ref().unwrap().item_embedding.clone());
+        let item_biases =
+            wyrm::ParameterNode::shared(self.model.as_ref().unwrap().item_biases.clone());
+
+        let positive_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
+        let negative_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
+
+        let positive_item_vector = item_embeddings.index(&positive_item_idx);
+        let negative_item_vector = item_embeddings.index(&negative_item_idx);
+        let positive_item_bias = item_biases.index(&positive_item_idx);
+        let negative_item_bias = item_biases.index(&negative_item_idx);
+
+        let positive_prediction =
+            user_vector.vector_dot(&positive_item_vector) + positive_item_bias;
+        let negative_prediciton =
+            user_vector.vector_dot(&negative_item_vector) + negative_item_bias;
+
+        let score_diff = positive_prediction - negative_prediciton;
+        let mut loss = -score_diff.sigmoid();
+
+        let mut optimizer = wyrm::Adagrad::new(self.hyper.learning_rate, vec![user_vector.clone()]);
+
+        let mut rng = rand::XorShiftRng::from_seed(thread_rng().gen());
+
+        for _ in 0..self.hyper.fold_in_epochs {
+            for &item_id in interactions {
+                positive_item_idx.set_value(item_id);
+                negative_item_idx.set_value(negative_item_range.ind_sample(&mut rng));
+
+                loss.forward();
+                loss.backward(1.0);
+
+                optimizer.step();
+                loss.zero_gradient();
+            }
+        }
+
+        let user_vec = user_vector.value();
+
+        Ok(user_vec.as_slice().unwrap().to_owned())
     }
 
     pub fn fit(
@@ -684,6 +803,39 @@ mod tests {
         let test_mat = test.to_compressed();
 
         let mrr = mrr_score(&model, &test_mat, &train_mat).unwrap();
+
+        println!("MRR {}", mrr);
+
+        assert!(mrr > 0.09);
+    }
+
+    #[test]
+    fn fold_in() {
+        let mut data = load_movielens("data.csv");
+
+        let (train, test) =
+            user_based_split(&mut data, &mut rand::XorShiftRng::new_unseeded(), 0.2);
+
+        println!("Train: {}, test: {}", train.len(), test.len());
+
+        let hyper = HyperparametersBuilder::default()
+            .learning_rate(0.5)
+            .latent_dim(32)
+            .build()
+            .unwrap();
+
+        let num_epochs = 50;
+
+        let mut model = ImplicitFactorizationModel::new(hyper);
+
+        println!(
+            "Loss: {}",
+            model.fit(&train.to_triplet(), num_epochs).unwrap()
+        );
+
+        let test_mat = test.to_compressed();
+
+        let mrr = fold_in_mrr_score(&model, &test_mat).unwrap();
 
         println!("MRR {}", mrr);
 
