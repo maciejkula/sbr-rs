@@ -58,7 +58,7 @@ pub fn user_based_split<R: Rng>(
     rng: &mut R,
     test_fraction: f32,
 ) -> (Interactions, Interactions) {
-    let denominator = 100000;
+    let denominator = 100_000;
     let train_cutoff = (test_fraction * denominator as f32) as u64;
 
     let range = Range::new(0, std::u64::MAX);

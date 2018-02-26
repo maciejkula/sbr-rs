@@ -1,11 +1,12 @@
 use std;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rayon;
 use rayon::prelude::*;
 use rand;
 use rand::distributions::{IndependentSample, Range};
-use rand::{thread_rng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, XorShiftRng};
 
 use wyrm;
 use wyrm::{Arr, DataInput};
@@ -13,8 +14,8 @@ use wyrm::{Arr, DataInput};
 use super::super::{ItemId, OnlineRankingModel};
 use data::TripletInteractions;
 
-fn embedding_init(rows: usize, cols: usize) -> wyrm::Arr {
-    Arr::zeros((rows, cols)).map(|_| rand::random::<f32>() / (cols as f32).sqrt())
+fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
+    Arr::zeros((rows, cols)).map(|_| rng.gen::<f32>() / (cols as f32).sqrt())
 }
 
 #[derive(Builder, Debug)]
@@ -27,10 +28,14 @@ pub struct Hyperparameters {
     learning_rate: f32,
     #[builder(default = "50")]
     fold_in_epochs: usize,
+    #[builder(default = "XorShiftRng::new_unseeded()")]
+    rng: XorShiftRng,
+    #[builder(default = "rayon::current_num_threads()")]
+    num_threads: usize,
 }
 
 #[derive(Debug)]
-struct ModelData {
+struct Parameters {
     num_users: usize,
     num_items: usize,
     user_embedding: Arc<wyrm::HogwildParameter>,
@@ -38,10 +43,52 @@ struct ModelData {
     item_biases: Arc<wyrm::HogwildParameter>,
 }
 
+impl Parameters {
+    fn build(&self, user_embedding: Arc<wyrm::HogwildParameter>, minibatch_size: usize) -> Model {
+        let user_embeddings = wyrm::ParameterNode::shared(user_embedding);
+        let item_embeddings = wyrm::ParameterNode::shared(self.item_embedding.clone());
+        let item_biases = wyrm::ParameterNode::shared(self.item_biases.clone());
+
+        let user_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
+        let positive_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
+        let negative_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
+
+        let user_vector = user_embeddings.index(&user_idx);
+        let positive_item_vector = item_embeddings.index(&positive_item_idx);
+        let negative_item_vector = item_embeddings.index(&negative_item_idx);
+        let positive_item_bias = item_biases.index(&positive_item_idx);
+        let negative_item_bias = item_biases.index(&negative_item_idx);
+
+        let positive_prediction =
+            user_vector.vector_dot(&positive_item_vector) + positive_item_bias;
+        let negative_prediciton =
+            user_vector.vector_dot(&negative_item_vector) + negative_item_bias;
+
+        let score_diff = positive_prediction - negative_prediciton;
+        let loss = -score_diff.sigmoid();
+
+        Model {
+            user_idx: user_idx,
+            user_embeddings: user_embeddings,
+            positive_item_idx: positive_item_idx,
+            negative_item_idx: negative_item_idx,
+            loss: loss.boxed(),
+        }
+    }
+}
+
+struct Model {
+    user_idx: wyrm::Variable<wyrm::IndexInputNode>,
+    user_embeddings: wyrm::Variable<wyrm::ParameterNode>,
+    positive_item_idx: wyrm::Variable<wyrm::IndexInputNode>,
+    negative_item_idx: wyrm::Variable<wyrm::IndexInputNode>,
+    loss: wyrm::Variable<Rc<wyrm::Node<Value = Arr, InputGradient = Arr>>>,
+}
+
 #[derive(Debug)]
 pub struct ImplicitFactorizationModel {
     hyper: Hyperparameters,
-    model: Option<ModelData>,
+    model: Option<Parameters>,
 }
 
 impl std::default::Default for ImplicitFactorizationModel {
@@ -126,19 +173,25 @@ impl ImplicitFactorizationModel {
         }
     }
 
-    fn build_model(&self, num_users: usize, num_items: usize, latent_dim: usize) -> ModelData {
+    fn build_model(&mut self, num_users: usize, num_items: usize) -> Parameters {
         let user_embeddings = Arc::new(wyrm::HogwildParameter::new(embedding_init(
             num_users,
-            latent_dim,
+            self.hyper.latent_dim,
+            &mut self.hyper.rng,
         )));
         let item_embeddings = Arc::new(wyrm::HogwildParameter::new(embedding_init(
             num_items,
-            latent_dim,
+            self.hyper.latent_dim,
+            &mut self.hyper.rng,
         )));
 
-        let item_biases = Arc::new(wyrm::HogwildParameter::new(embedding_init(num_items, 1)));
+        let item_biases = Arc::new(wyrm::HogwildParameter::new(embedding_init(
+            num_items,
+            1,
+            &mut self.hyper.rng,
+        )));
 
-        ModelData {
+        Parameters {
             num_users: num_users,
             num_items: num_items,
             user_embedding: user_embeddings,
@@ -154,44 +207,35 @@ impl ImplicitFactorizationModel {
 
         let negative_item_range = Range::new(0, self.model.as_ref().unwrap().num_items);
         let minibatch_size = 1;
+        let mut rng = rand::XorShiftRng::from_seed([42; 4]);
 
-        let user_vector = wyrm::ParameterNode::new(embedding_init(1, self.hyper.latent_dim));
+        let user_vector = Arc::new(wyrm::HogwildParameter::new(embedding_init(
+            1,
+            self.hyper.latent_dim,
+            &mut rng,
+        )));
 
-        let item_embeddings =
-            wyrm::ParameterNode::shared(self.model.as_ref().unwrap().item_embedding.clone());
-        let item_biases =
-            wyrm::ParameterNode::shared(self.model.as_ref().unwrap().item_biases.clone());
+        let mut model = self.model
+            .as_ref()
+            .unwrap()
+            .build(user_vector.clone(), minibatch_size);
+        let mut optimizer =
+            wyrm::Adagrad::new(self.hyper.learning_rate, vec![model.user_embeddings]);
 
-        let positive_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
-        let negative_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
-
-        let positive_item_vector = item_embeddings.index(&positive_item_idx);
-        let negative_item_vector = item_embeddings.index(&negative_item_idx);
-        let positive_item_bias = item_biases.index(&positive_item_idx);
-        let negative_item_bias = item_biases.index(&negative_item_idx);
-
-        let positive_prediction =
-            user_vector.vector_dot(&positive_item_vector) + positive_item_bias;
-        let negative_prediciton =
-            user_vector.vector_dot(&negative_item_vector) + negative_item_bias;
-
-        let score_diff = positive_prediction - negative_prediciton;
-        let mut loss = -score_diff.sigmoid();
-
-        let mut optimizer = wyrm::Adagrad::new(self.hyper.learning_rate, vec![user_vector.clone()]);
-
-        let mut rng = rand::XorShiftRng::from_seed(thread_rng().gen());
+        model.user_idx.set_value(0);
 
         for _ in 0..self.hyper.fold_in_epochs {
             for &item_id in interactions {
-                positive_item_idx.set_value(item_id);
-                negative_item_idx.set_value(negative_item_range.ind_sample(&mut rng));
+                model.positive_item_idx.set_value(item_id);
+                model
+                    .negative_item_idx
+                    .set_value(negative_item_range.ind_sample(&mut rng));
 
-                loss.forward();
-                loss.backward(1.0);
+                model.loss.forward();
+                model.loss.backward(1.0);
 
                 optimizer.step();
-                loss.zero_gradient();
+                model.loss.zero_gradient();
             }
         }
 
@@ -208,53 +252,33 @@ impl ImplicitFactorizationModel {
         let minibatch_size = self.hyper.minibatch_size;
 
         if self.model.is_none() {
-            self.model = Some(self.build_model(
-                interactions.num_users(),
-                interactions.num_items(),
-                self.hyper.latent_dim,
-            ));
+            self.model = Some(self.build_model(interactions.num_users(), interactions.num_items()));
         }
 
         let negative_item_range = Range::new(0, interactions.num_items());
+        let num_partitions = self.hyper.num_threads;
+        let seeds: Vec<[u32; 4]> = (0..num_partitions).map(|_| self.hyper.rng.gen()).collect();
 
-        let num_partitions = rayon::current_num_threads();
-
-        let losses: Vec<f32> = interactions
+        let partitions: Vec<_> = interactions
             .iter_minibatch_partitioned(minibatch_size, num_partitions)
+            .into_iter()
+            .zip(seeds.into_iter())
+            .collect();
+
+        let losses: Vec<f32> = partitions
             .into_par_iter()
-            .map(|data| {
-                let user_embeddings = wyrm::ParameterNode::shared(
+            .map(|(data, seed)| {
+                let mut model = self.model.as_ref().unwrap().build(
                     self.model.as_ref().unwrap().user_embedding.clone(),
+                    minibatch_size,
                 );
-                let item_embeddings = wyrm::ParameterNode::shared(
-                    self.model.as_ref().unwrap().item_embedding.clone(),
-                );
-                let item_biases =
-                    wyrm::ParameterNode::shared(self.model.as_ref().unwrap().item_biases.clone());
 
-                let user_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
-                let positive_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
-                let negative_item_idx = wyrm::IndexInputNode::new(&vec![0; minibatch_size]);
-
-                let user_vector = user_embeddings.index(&user_idx);
-                let positive_item_vector = item_embeddings.index(&positive_item_idx);
-                let negative_item_vector = item_embeddings.index(&negative_item_idx);
-                let positive_item_bias = item_biases.index(&positive_item_idx);
-                let negative_item_bias = item_biases.index(&negative_item_idx);
-
-                let positive_prediction =
-                    user_vector.vector_dot(&positive_item_vector) + positive_item_bias;
-                let negative_prediciton =
-                    user_vector.vector_dot(&negative_item_vector) + negative_item_bias;
-
-                let score_diff = positive_prediction - negative_prediciton;
-                let mut loss = -score_diff.sigmoid();
-
-                let mut optimizer = wyrm::Adagrad::new(self.hyper.learning_rate, loss.parameters());
+                let mut optimizer =
+                    wyrm::Adagrad::new(self.hyper.learning_rate, model.loss.parameters());
 
                 let mut batch_negatives = vec![0; minibatch_size];
 
-                let mut rng = rand::XorShiftRng::from_seed(thread_rng().gen());
+                let mut rng = rand::XorShiftRng::from_seed(seed);
                 let mut loss_value = 0.0;
 
                 let mut num_observations = 0;
@@ -271,17 +295,19 @@ impl ImplicitFactorizationModel {
                             *negative = negative_item_range.ind_sample(&mut rng);
                         }
 
-                        user_idx.set_value(batch.user_ids);
-                        positive_item_idx.set_value(batch.item_ids);
-                        negative_item_idx.set_value(batch_negatives.as_slice());
+                        model.user_idx.set_value(batch.user_ids);
+                        model.positive_item_idx.set_value(batch.item_ids);
+                        model
+                            .negative_item_idx
+                            .set_value(batch_negatives.as_slice());
 
-                        loss.forward();
-                        loss.backward(1.0);
+                        model.loss.forward();
+                        model.loss.backward(1.0);
 
-                        loss_value += loss.value().scalar_sum();
+                        loss_value += model.loss.value().scalar_sum();
 
                         optimizer.step();
-                        loss.zero_gradient();
+                        model.loss.zero_gradient();
                     }
                 }
 
@@ -314,14 +340,18 @@ mod tests {
     fn fold_in() {
         let mut data = load_movielens("data.csv");
 
-        let (train, test) =
-            user_based_split(&mut data, &mut rand::XorShiftRng::new_unseeded(), 0.2);
+        let mut rng = rand::XorShiftRng::from_seed([42; 4]);
+
+        let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
 
         println!("Train: {}, test: {}", train.len(), test.len());
 
         let hyper = HyperparametersBuilder::default()
             .learning_rate(0.5)
+            .fold_in_epochs(50)
             .latent_dim(32)
+            .num_threads(1)
+            .rng(rng)
             .build()
             .unwrap();
 
@@ -340,7 +370,7 @@ mod tests {
 
         println!("MRR {}", mrr);
 
-        assert!(mrr > 0.07);
+        assert!(mrr > 0.065);
     }
 
     #[bench]
