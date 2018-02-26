@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::hash::Hasher;
 
 use rand::distributions::{IndependentSample, Range};
-use rand::{thread_rng, Rng, SeedableRng};
+use rand::Rng;
 
 use siphasher::sip::SipHasher;
 
