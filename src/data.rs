@@ -27,16 +27,16 @@ impl Interaction {
 }
 
 impl Interaction {
-    fn user_id(&self) -> UserId {
+    pub fn user_id(&self) -> UserId {
         self.user_id
     }
-    fn item_id(&self) -> ItemId {
+    pub fn item_id(&self) -> ItemId {
         self.item_id
     }
-    fn weight(&self) -> f32 {
+    pub fn weight(&self) -> f32 {
         1.0
     }
-    fn timestamp(&self) -> Timestamp {
+    pub fn timestamp(&self) -> Timestamp {
         self.timestamp
     }
 }
@@ -225,7 +225,7 @@ impl<'a> From<&'a Interactions> for CompressedInteractions {
 impl CompressedInteractions {
     pub fn iter_users(&self) -> CompressedInteractionsUserIterator {
         CompressedInteractionsUserIterator {
-            interactions: &self,
+            interactions: self,
             idx: 0,
         }
     }
@@ -307,7 +307,7 @@ impl TripletInteractions {
     }
     pub fn iter_minibatch(&self, minibatch_size: usize) -> TripletMinibatchIterator {
         TripletMinibatchIterator {
-            interactions: &self,
+            interactions: self,
             idx: 0,
             stop_idx: self.len(),
             minibatch_size: minibatch_size,
@@ -349,7 +349,7 @@ pub struct TripletMinibatchIterator<'a> {
 impl<'a> TripletMinibatchIterator<'a> {
     pub fn slice(&self, start: usize, stop: usize) -> TripletMinibatchIterator<'a> {
         TripletMinibatchIterator {
-            interactions: &self.interactions,
+            interactions: self.interactions,
             idx: start,
             stop_idx: stop,
             minibatch_size: self.minibatch_size,

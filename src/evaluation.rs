@@ -11,7 +11,7 @@ pub fn mrr_score<T: OnlineRankingModel>(
 
     let mrrs: Vec<f32> = test.iter_users()
         .filter_map(|test_user| {
-            if test_user.item_ids.len() == 0 {
+            if test_user.item_ids.is_empty() {
                 return None;
             }
 

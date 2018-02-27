@@ -8,6 +8,8 @@ use rand;
 use rand::distributions::{IndependentSample, Range};
 use rand::{Rng, SeedableRng, XorShiftRng};
 
+use ndarray::Axis;
+
 use wyrm;
 use wyrm::{Arr, DataInput};
 
@@ -134,15 +136,15 @@ impl ImplicitFactorizationModel {
     }
 
     pub fn num_users(&self) -> Option<usize> {
-        match &self.model {
-            &Some(ref model) => Some(model.num_users),
+        match self.model {
+            Some(ref model) => Some(model.num_users),
             _ => None,
         }
     }
 
     pub fn num_items(&self) -> Option<usize> {
-        match &self.model {
-            &Some(ref model) => Some(model.num_items),
+        match self.model {
+            Some(ref model) => Some(model.num_items),
             _ => None,
         }
     }
@@ -150,20 +152,22 @@ impl ImplicitFactorizationModel {
     fn predict_user(
         &self,
         user_embedding: &[f32],
-        item_id: &[usize],
+        item_ids: &[usize],
     ) -> Result<Vec<f32>, &'static str> {
         if let Some(ref model) = self.model {
             let item_embeddings = &model.item_embedding;
             let item_biases = &model.item_biases;
 
-            let predictions: Vec<f32> = item_embeddings
-                .value
-                .borrow()
-                .genrows()
-                .into_iter()
-                .zip(item_biases.value.borrow().as_slice().unwrap())
-                .map(|(item_embedding, item_bias)| {
-                    item_bias + wyrm::simd_dot(user_embedding, item_embedding.as_slice().unwrap())
+            let embeddings = item_embeddings.value();
+            let biases = item_biases.value();
+
+            let predictions: Vec<f32> = item_ids
+                .iter()
+                .map(|&item_idx| {
+                    let embedding = embeddings.subview(Axis(0), item_idx);
+                    let bias = biases[(item_idx, 0)];
+
+                    bias + wyrm::simd_dot(user_embedding, embedding.as_slice().unwrap())
                 })
                 .collect();
 
@@ -291,7 +295,7 @@ impl ImplicitFactorizationModel {
 
                         num_observations += batch.len();
 
-                        for negative in batch_negatives.iter_mut() {
+                        for negative in &mut batch_negatives {
                             *negative = negative_item_range.ind_sample(&mut rng);
                         }
 
