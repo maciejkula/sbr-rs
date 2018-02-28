@@ -1,15 +1,19 @@
 use std;
 
+use rayon::prelude::*;
+
 use super::OnlineRankingModel;
 use data::CompressedInteractions;
 
-pub fn mrr_score<T: OnlineRankingModel>(
+pub fn mrr_score<T: OnlineRankingModel + Sync>(
     model: &T,
     test: &CompressedInteractions,
 ) -> Result<f32, &'static str> {
     let item_ids: Vec<usize> = (0..test.num_items()).collect();
 
-    let mrrs: Vec<f32> = test.iter_users()
+    let mrrs: Vec<f32> = test.iter_users().collect::<Vec<_>>()
+        .par_iter()
+        //.iter()
         .filter_map(|test_user| {
             if test_user.item_ids.is_empty() {
                 return None;
@@ -26,18 +30,16 @@ pub fn mrr_score<T: OnlineRankingModel>(
                 predictions[train_item_id] = std::f32::MIN;
             }
 
-            let test_scores = vec![predictions[test_item]];
-            let mut ranks: Vec<usize> = vec![0];
+            let test_score = predictions[test_item];
+            let mut rank = 0;
 
             for &prediction in &predictions {
-                for (rank, &score) in ranks.iter_mut().zip(&test_scores) {
-                    if prediction >= score {
-                        *rank += 1;
-                    }
+                if prediction >= test_score {
+                    rank += 1;
                 }
             }
 
-            Some(ranks.iter().map(|&x| 1.0 / x as f32).sum::<f32>() / ranks.len() as f32)
+            Some(1.0 / rank as f32)
         })
         .collect();
 

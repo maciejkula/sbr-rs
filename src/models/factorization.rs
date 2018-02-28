@@ -20,7 +20,7 @@ fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     Arr::zeros((rows, cols)).map(|_| rng.gen::<f32>() / (cols as f32).sqrt())
 }
 
-#[derive(Builder, Debug)]
+#[derive(Builder, Clone, Debug)]
 pub struct Hyperparameters {
     #[builder(default = "16")]
     latent_dim: usize,
@@ -30,7 +30,7 @@ pub struct Hyperparameters {
     learning_rate: f32,
     #[builder(default = "50")]
     fold_in_epochs: usize,
-    #[builder(default = "XorShiftRng::new_unseeded()")]
+    #[builder(default = "XorShiftRng::from_seed(rand::thread_rng().gen())")]
     rng: XorShiftRng,
     #[builder(default = "rayon::current_num_threads()")]
     num_threads: usize,
