@@ -270,6 +270,15 @@ pub struct CompressedInteractionsUser<'a> {
     pub timestamps: &'a [Timestamp],
 }
 
+impl<'a> CompressedInteractionsUser<'a> {
+    pub fn len(&self) -> usize {
+        self.item_ids.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.item_ids.is_empty()
+    }
+}
+
 impl<'a> Iterator for CompressedInteractionsUserIterator<'a> {
     type Item = CompressedInteractionsUser<'a>;
     fn next(&mut self) -> Option<Self::Item> {
