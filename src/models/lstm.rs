@@ -1,9 +1,9 @@
-use std;
-use std::rc::Rc;
+// use std;
+// use std::rc::Rc;
 use std::sync::Arc;
 
 use rayon;
-use rayon::prelude::*;
+// use rayon::prelude::*;
 use rand;
 use rand::distributions::{IndependentSample, Range};
 use rand::{Rng, SeedableRng, XorShiftRng};
@@ -15,7 +15,7 @@ use wyrm::nn;
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
 use super::super::{ItemId, OnlineRankingModel};
-use data::{CompressedInteractions, TripletInteractions};
+use data::{CompressedInteractions};
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     Arr::zeros((rows, cols)).map(|_| rng.gen::<f32>() / (cols as f32).sqrt())
@@ -38,12 +38,12 @@ impl Hyperparameters {
         Hyperparameters {
             num_items: num_items,
             max_sequence_length: max_sequence_length,
-            item_embedding_dim: 16,
-            hidden_dim: 16,
+            item_embedding_dim: 32,
+            hidden_dim: 32,
             learning_rate: 0.05,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
-            num_epochs: 1,
+            num_epochs: 10,
         }
     }
 
@@ -146,11 +146,21 @@ impl Parameters {
             .map(|(pos, neg)| (neg - pos).sigmoid().boxed())
             .collect();
 
+        let mut summed_losses = Vec::with_capacity(losses.len());
+        summed_losses.push(losses[0].clone());
+
+        for loss in &losses[1..] {
+            let loss = (summed_losses.last().unwrap().clone() + loss.clone()).boxed();
+            summed_losses.push(loss);
+        }
+
         Model {
             inputs: inputs,
             outputs: outputs,
             negatives: negatives,
+            hidden_states: hidden,
             losses: losses,
+            summed_losses: summed_losses,
         }
     }
 }
@@ -159,7 +169,9 @@ struct Model {
     inputs: Vec<Variable<wyrm::IndexInputNode>>,
     outputs: Vec<Variable<wyrm::IndexInputNode>>,
     negatives: Vec<Variable<wyrm::IndexInputNode>>,
+    hidden_states: Vec<Variable<BoxedNode>>,
     losses: Vec<Variable<BoxedNode>>,
+    summed_losses: Vec<Variable<BoxedNode>>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,19 +180,9 @@ pub struct ImplicitLSTMModel {
     params: Parameters,
 }
 
-#[derive(Debug, Clone)]
-pub struct ImplicitLSTMUser {
-    user_embedding: Vec<f32>,
-}
-
 impl ImplicitLSTMModel {
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, &'static str> {
         let negative_item_range = Range::new(0, interactions.num_items());
-        let num_partitions = self.hyper.num_threads;
-        //let seeds: Vec<[u32; 4]> = (0..num_partitions).map(|_| self.hyper.rng.gen()).collect();
-
-        //let interactions: Vec<_> = interactions.iter_users().collect();
-
         // TODO: parallelism
 
         let mut model = self.params.build(self.hyper.max_sequence_length);
@@ -192,7 +194,10 @@ impl ImplicitLSTMModel {
 
         let mut loss_value = 0.0;
 
-        for user in interactions.iter_users().filter(|user| !user.is_empty()) {
+        let mut data: Vec<_> = interactions.iter_users().filter(|user| !user.is_empty()).collect();
+        self.hyper.rng.shuffle(&mut data);
+        
+        for user in &data {
             // Cap item_ids to be at most `max_sequence_length` elements,
             // cutting off early parts of the sequence if necessary.
             let item_ids = &user.item_ids[user.item_ids
@@ -200,7 +205,7 @@ impl ImplicitLSTMModel {
                                               .saturating_sub(self.hyper.max_sequence_length)..];
 
             // Sample negatives.
-            for neg_idx in &mut negatives[..user.len()] {
+            for neg_idx in &mut negatives[..item_ids.len()] {
                 *neg_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
             }
 
@@ -219,10 +224,11 @@ impl ImplicitLSTMModel {
             }
 
             // Get the loss at the end of the sequence.
-            let loss = &mut model.losses[item_ids.len() - 1];
+            let loss = &mut model.summed_losses[item_ids.len() - 1];
 
+            loss.zero_gradient();
             loss.forward();
-            loss.backward(1.0);
+            loss.backward(1.0 / (item_ids.len() - 1) as f32);
             optimizer.step();
 
             loss_value += loss.value().scalar_sum();
@@ -232,275 +238,112 @@ impl ImplicitLSTMModel {
     }
 }
 
-// impl OnlineRankingModel for ImplicitFactorizationModel {
-//     type UserRepresentation = ImplicitFactorizationUser;
-//     fn user_representation(
-//         &self,
-//         item_ids: &[ItemId],
-//     ) -> Result<Self::UserRepresentation, &'static str> {
-//         let embedding = self.fold_in_user(item_ids)?;
-//         Ok(ImplicitFactorizationUser {
-//             user_embedding: embedding,
-//         })
-//     }
-//     fn predict(
-//         &self,
-//         user: &Self::UserRepresentation,
-//         item_ids: &[ItemId],
-//     ) -> Result<Vec<f32>, &'static str> {
-//         self.predict_user(&user.user_embedding, item_ids)
-//     }
-// }
+#[derive(Clone, Debug)]
+pub struct ImplicitLSTMUser {
+    user_embedding: Vec<f32>,
+}
 
-// impl ImplicitFactorizationModel {
-//     pub fn new(hyper: Hyperparameters) -> Self {
-//         ImplicitFactorizationModel {
-//             hyper: hyper,
-//             model: None,
-//         }
-//     }
+impl OnlineRankingModel for ImplicitLSTMModel {
+    type UserRepresentation = ImplicitLSTMUser;
+    fn user_representation(
+        &self,
+        item_ids: &[ItemId],
+    ) -> Result<Self::UserRepresentation, &'static str> {
 
-//     pub fn num_users(&self) -> Option<usize> {
-//         match self.model {
-//             Some(ref model) => Some(model.num_users),
-//             _ => None,
-//         }
-//     }
+        let model = self.params.build(self.hyper.max_sequence_length);
+        let item_ids = &item_ids[item_ids
+                                 .len()
+                                 .saturating_sub(self.hyper.max_sequence_length)..];
 
-//     pub fn num_items(&self) -> Option<usize> {
-//         match self.model {
-//             Some(ref model) => Some(model.num_items),
-//             _ => None,
-//         }
-//     }
+        for (&input_idx, input) in izip!(item_ids, &model.inputs) {
+            input.set_value(input_idx);
+        }
 
-//     fn predict_user(
-//         &self,
-//         user_embedding: &[f32],
-//         item_ids: &[usize],
-//     ) -> Result<Vec<f32>, &'static str> {
-//         if let Some(ref model) = self.model {
-//             let item_embeddings = &model.item_embedding;
-//             let item_biases = &model.item_biases;
+        // Select the hidden state after ingesting all the inputs.
+        let hidden_state = &model.hidden_states[item_ids.len() - 1];
 
-//             let embeddings = item_embeddings.value();
-//             let biases = item_biases.value();
+        // Run the network forward up to that point. Remember to reset
+        // the cached state.
+        hidden_state.zero_gradient();
+        hidden_state.forward();
+        
+        // Get the value.
+        let representation = hidden_state.value();
 
-//             let predictions: Vec<f32> = item_ids
-//                 .iter()
-//                 .map(|&item_idx| {
-//                     let embedding = embeddings.subview(Axis(0), item_idx);
-//                     let bias = biases[(item_idx, 0)];
+        Ok(ImplicitLSTMUser {
+            user_embedding: representation.as_slice().unwrap().to_owned()
+        })
+    }
+    fn predict(
+        &self,
+        user: &Self::UserRepresentation,
+        item_ids: &[ItemId],
+    ) -> Result<Vec<f32>, &'static str> {
 
-//                     bias + wyrm::simd_dot(user_embedding, embedding.as_slice().unwrap())
-//                 })
-//                 .collect();
+        let item_embeddings = &self.params.item_embedding;
+        let item_biases = &self.params.item_biases;
 
-//             Ok(predictions)
-//         } else {
-//             Err("Model must be fitted first.")
-//         }
-//     }
+        let embeddings = item_embeddings.value();
+        let biases = item_biases.value();
 
-//     fn build_model(&mut self, num_users: usize, num_items: usize) -> Parameters {
-//         let user_embeddings = Arc::new(wyrm::HogwildParameter::new(embedding_init(
-//             num_users,
-//             self.hyper.latent_dim,
-//             &mut self.hyper.rng,
-//         )));
-//         let item_embeddings = Arc::new(wyrm::HogwildParameter::new(embedding_init(
-//             num_items,
-//             self.hyper.latent_dim,
-//             &mut self.hyper.rng,
-//         )));
+        let predictions: Vec<f32> = item_ids
+            .iter()
+            .map(|&item_idx| {
+                let embedding = embeddings.subview(Axis(0), item_idx);
+                let bias = biases[(item_idx, 0)];
 
-//         let item_biases = Arc::new(wyrm::HogwildParameter::new(embedding_init(
-//             num_items,
-//             1,
-//             &mut self.hyper.rng,
-//         )));
+                bias + wyrm::simd_dot(&user.user_embedding, embedding.as_slice().unwrap())
+            })
+            .collect();
 
-//         Parameters {
-//             num_users: num_users,
-//             num_items: num_items,
-//             user_embedding: user_embeddings,
-//             item_embedding: item_embeddings,
-//             item_biases: item_biases,
-//         }
-//     }
+        Ok(predictions)
+    }
+}
 
-//     fn fold_in_user(&self, interactions: &[ItemId]) -> Result<Vec<f32>, &'static str> {
-//         if self.model.is_none() {
-//             return Err("Model must be fitted before trying to fold-in users.");
-//         }
+#[cfg(test)]
+mod tests {
 
-//         let negative_item_range = Range::new(0, self.model.as_ref().unwrap().num_items);
-//         let minibatch_size = 1;
-//         let mut rng = rand::XorShiftRng::from_seed([42; 4]);
+    use csv;
 
-//         let user_vector = Arc::new(wyrm::HogwildParameter::new(embedding_init(
-//             1,
-//             self.hyper.latent_dim,
-//             &mut rng,
-//         )));
+    use super::*;
+    use data::{user_based_split, Interaction, Interactions};
+    use evaluation::mrr_score;
 
-//         let mut model = self.model
-//             .as_ref()
-//             .unwrap()
-//             .build(user_vector.clone(), minibatch_size);
-//         let mut optimizer =
-//             wyrm::Adagrad::new(self.hyper.learning_rate, vec![model.user_embeddings]);
+    fn load_movielens(path: &str) -> Interactions {
+        let mut reader = csv::Reader::from_path(path).unwrap();
+        let interactions: Vec<Interaction> = reader.deserialize().map(|x| x.unwrap()).collect();
 
-//         model.user_idx.set_value(0);
+        Interactions::from(interactions)
+    }
 
-//         for _ in 0..self.hyper.fold_in_epochs {
-//             for &item_id in interactions {
-//                 model.positive_item_idx.set_value(item_id);
-//                 model
-//                     .negative_item_idx
-//                     .set_value(negative_item_range.ind_sample(&mut rng));
+    #[test]
+    fn fold_in() {
+        let mut data = load_movielens("data.csv");
 
-//                 model.loss.forward();
-//                 model.loss.backward(1.0);
+        let mut rng = rand::XorShiftRng::from_seed([42; 4]);
 
-//                 optimizer.step();
-//                 model.loss.zero_gradient();
-//             }
-//         }
+        let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
 
-//         let user_vec = user_vector.value();
+        println!("Train: {}, test: {}", train.len(), test.len());
 
-//         Ok(user_vec.as_slice().unwrap().to_owned())
-//     }
+        let mut model = Hyperparameters::new(train.num_items(), 100).build();
 
-//     pub fn fit(
-//         &mut self,
-//         interactions: &TripletInteractions,
-//         num_epochs: usize,
-//     ) -> Result<f32, &'static str> {
-//         let minibatch_size = self.hyper.minibatch_size;
+        let num_epochs = 50;
+        let test_mat = test.to_compressed();
 
-//         if self.model.is_none() {
-//             self.model = Some(self.build_model(interactions.num_users(), interactions.num_items()));
-//         }
+        for _ in 0..num_epochs {
+            println!(
+                "Loss: {}",
+                model.fit(&train.to_compressed()).unwrap()
+            );
+        }
+        let mrr = mrr_score(&model, &train.to_compressed()).unwrap();
+        println!("MRR {}", mrr);
+        let mrr = mrr_score(&model, &test.to_compressed()).unwrap();
+        println!("MRR {}", mrr);
 
-//         let negative_item_range = Range::new(0, interactions.num_items());
-//         let num_partitions = self.hyper.num_threads;
-//         let seeds: Vec<[u32; 4]> = (0..num_partitions).map(|_| self.hyper.rng.gen()).collect();
-
-//         let partitions: Vec<_> = interactions
-//             .iter_minibatch_partitioned(minibatch_size, num_partitions)
-//             .into_iter()
-//             .zip(seeds.into_iter())
-//             .collect();
-
-//         let losses: Vec<f32> = partitions
-//             .into_par_iter()
-//             .map(|(data, seed)| {
-//                 let mut model = self.model.as_ref().unwrap().build(
-//                     self.model.as_ref().unwrap().user_embedding.clone(),
-//                     minibatch_size,
-//                 );
-
-//                 let mut optimizer =
-//                     wyrm::Adagrad::new(self.hyper.learning_rate, model.loss.parameters());
-
-//                 let mut batch_negatives = vec![0; minibatch_size];
-
-//                 let mut rng = rand::XorShiftRng::from_seed(seed);
-//                 let mut loss_value = 0.0;
-
-//                 let mut num_observations = 0;
-
-//                 for _ in 0..num_epochs {
-//                     for batch in data.clone() {
-//                         if batch.len() < minibatch_size {
-//                             break;
-//                         }
-
-//                         num_observations += batch.len();
-
-//                         for negative in &mut batch_negatives {
-//                             *negative = negative_item_range.ind_sample(&mut rng);
-//                         }
-
-//                         model.user_idx.set_value(batch.user_ids);
-//                         model.positive_item_idx.set_value(batch.item_ids);
-//                         model
-//                             .negative_item_idx
-//                             .set_value(batch_negatives.as_slice());
-
-//                         model.loss.forward();
-//                         model.loss.backward(1.0);
-
-//                         loss_value += model.loss.value().scalar_sum();
-
-//                         optimizer.step();
-//                         model.loss.zero_gradient();
-//                     }
-//                 }
-
-//                 loss_value / num_observations as f32
-//             })
-//             .collect();
-
-//         Ok(losses.into_iter().sum())
-//     }
-// }
-
-// #[cfg(test)]
-// mod tests {
-
-//     use csv;
-
-//     use super::*;
-//     use data::{user_based_split, Interaction, Interactions};
-//     use evaluation::mrr_score;
-//     use test::Bencher;
-
-//     fn load_movielens(path: &str) -> Interactions {
-//         let mut reader = csv::Reader::from_path(path).unwrap();
-//         let interactions: Vec<Interaction> = reader.deserialize().map(|x| x.unwrap()).collect();
-
-//         Interactions::from(interactions)
-//     }
-
-//     #[test]
-//     fn fold_in() {
-//         let mut data = load_movielens("data.csv");
-
-//         let mut rng = rand::XorShiftRng::from_seed([42; 4]);
-
-//         let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
-
-//         println!("Train: {}, test: {}", train.len(), test.len());
-
-//         let hyper = HyperparametersBuilder::default()
-//             .learning_rate(0.5)
-//             .fold_in_epochs(50)
-//             .latent_dim(32)
-//             .num_threads(1)
-//             .rng(rng)
-//             .build()
-//             .unwrap();
-
-//         let num_epochs = 50;
-
-//         let mut model = ImplicitFactorizationModel::new(hyper);
-
-//         println!(
-//             "Loss: {}",
-//             model.fit(&train.to_triplet(), num_epochs).unwrap()
-//         );
-
-//         let test_mat = test.to_compressed();
-
-//         let mrr = mrr_score(&model, &test_mat).unwrap();
-
-//         println!("MRR {}", mrr);
-
-//         assert!(mrr > 0.065);
-//     }
+        //assert!(mrr > 0.065);
+    }
 
 //     #[bench]
 //     fn bench_movielens(b: &mut Bencher) {
@@ -517,27 +360,4 @@ impl ImplicitLSTMModel {
 //             model.fit(&data, num_epochs).unwrap();
 //         });
 //     }
-
-//     // #[bench]
-//     // fn bench_movielens_10m(b: &mut Bencher) {
-//     //     let data = load_movielens("/home/maciej/Downloads/data.csv");
-//     //     //let data = load_movielens("data.csv");
-//     //     let num_epochs = 1;
-
-//     //     let mut model = ImplicitFactorizationModel::default();
-//     //     println!("Num obs {}", data.len());
-
-//     //     model.fit(&data, 1).unwrap();
-
-//     //     let mut runs = 0;
-//     //     let mut elapsed = std::time::Duration::default();
-
-//     //     b.iter(|| {
-//     //         let start = std::time::Instant::now();
-//     //         println!("Loss: {}", model.fit(&data, num_epochs).unwrap());
-//     //         elapsed += start.elapsed();
-//     //         runs += 1;
-//     //         println!("Avg duration: {:#?}", elapsed / runs);
-//     //     });
-//     // }
-// }
+}
