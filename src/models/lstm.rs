@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rayon;
 // use rayon::prelude::*;
 use rand;
-use rand::distributions::{IndependentSample, Range};
+use rand::distributions::{IndependentSample, Normal, Range};
 use rand::{Rng, SeedableRng, XorShiftRng};
 
 use ndarray::Axis;
@@ -15,10 +15,11 @@ use wyrm::nn;
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
 use super::super::{ItemId, OnlineRankingModel};
-use data::{CompressedInteractions};
+use data::CompressedInteractions;
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
-    Arr::zeros((rows, cols)).map(|_| rng.gen::<f32>() / (cols as f32).sqrt())
+    let normal = Normal::new(0.0, 1.0 / (rows as f64).sqrt());
+    Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
 }
 
 #[derive(Builder, Clone, Debug)]
@@ -38,9 +39,9 @@ impl Hyperparameters {
         Hyperparameters {
             num_items: num_items,
             max_sequence_length: max_sequence_length,
-            item_embedding_dim: 32,
-            hidden_dim: 32,
-            learning_rate: 0.05,
+            item_embedding_dim: 16,
+            hidden_dim: 16,
+            learning_rate: 0.1,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
@@ -54,11 +55,7 @@ impl Hyperparameters {
             &mut self.rng,
         )));
 
-        let item_biases = Arc::new(wyrm::HogwildParameter::new(embedding_init(
-            self.num_items,
-            1,
-            &mut self.rng,
-        )));
+        let item_biases = Arc::new(wyrm::HogwildParameter::new(Arr::zeros((self.num_items, 1))));
 
         Parameters {
             item_embedding: item_embeddings,
@@ -190,51 +187,57 @@ impl ImplicitLSTMModel {
         let mut optimizer = wyrm::Adagrad::new(
             self.hyper.learning_rate,
             model.losses.last().unwrap().parameters(),
-        );
+        ).l2_penalty(1e-4);
+        let mut optimizer = wyrm::SGD::new(0.5, model.losses.last().unwrap().parameters());
 
         let mut loss_value = 0.0;
 
-        let mut data: Vec<_> = interactions.iter_users().filter(|user| !user.is_empty()).collect();
-        self.hyper.rng.shuffle(&mut data);
-        
-        for user in &data {
-            // Cap item_ids to be at most `max_sequence_length` elements,
-            // cutting off early parts of the sequence if necessary.
-            let item_ids = &user.item_ids[user.item_ids
-                                              .len()
-                                              .saturating_sub(self.hyper.max_sequence_length)..];
+        let mut data: Vec<_> = interactions
+            .iter_users()
+            .filter(|user| !user.is_empty())
+            .collect();
 
-            // Sample negatives.
-            for neg_idx in &mut negatives[..item_ids.len()] {
-                *neg_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
+        for _ in 0..self.hyper.num_epochs {
+            self.hyper.rng.shuffle(&mut data);
+
+            for user in &data {
+                // Cap item_ids to be at most `max_sequence_length` elements,
+                // cutting off early parts of the sequence if necessary.
+                let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
+                    self.hyper.max_sequence_length,
+                )..];
+
+                // Sample negatives.
+                for neg_idx in &mut negatives[..item_ids.len()] {
+                    *neg_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
+                }
+
+                // Set all the inputs.
+                for (&input_idx, &output_idx, &negative_idx, input, output, negative) in izip!(
+                    item_ids,
+                    &item_ids[1..],
+                    &negatives,
+                    &mut model.inputs,
+                    &mut model.outputs,
+                    &mut model.negatives
+                ) {
+                    input.set_value(input_idx);
+                    output.set_value(output_idx);
+                    negative.set_value(negative_idx);
+                }
+
+                // Get the loss at the end of the sequence.
+                let loss = &mut model.summed_losses[item_ids.len() - 1];
+
+                loss.zero_gradient();
+                loss.forward();
+                loss.backward(1.0 / (item_ids.len() - 1) as f32);
+                optimizer.step();
+
+                loss_value += loss.value().scalar_sum();
             }
-
-            // Set all the inputs.
-            for (&input_idx, &output_idx, &negative_idx, input, output, negative) in izip!(
-                item_ids,
-                &item_ids[1..],
-                &negatives,
-                &mut model.inputs,
-                &mut model.outputs,
-                &mut model.negatives
-            ) {
-                input.set_value(input_idx);
-                output.set_value(output_idx);
-                negative.set_value(negative_idx);
-            }
-
-            // Get the loss at the end of the sequence.
-            let loss = &mut model.summed_losses[item_ids.len() - 1];
-
-            loss.zero_gradient();
-            loss.forward();
-            loss.backward(1.0 / (item_ids.len() - 1) as f32);
-            optimizer.step();
-
-            loss_value += loss.value().scalar_sum();
         }
-
-        Ok(loss_value)
+        Ok(loss_value / self.hyper.num_epochs as f32)
     }
 }
 
@@ -249,11 +252,10 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         &self,
         item_ids: &[ItemId],
     ) -> Result<Self::UserRepresentation, &'static str> {
-
         let model = self.params.build(self.hyper.max_sequence_length);
         let item_ids = &item_ids[item_ids
-                                 .len()
-                                 .saturating_sub(self.hyper.max_sequence_length)..];
+                                     .len()
+                                     .saturating_sub(self.hyper.max_sequence_length)..];
 
         for (&input_idx, input) in izip!(item_ids, &model.inputs) {
             input.set_value(input_idx);
@@ -266,12 +268,12 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         // the cached state.
         hidden_state.zero_gradient();
         hidden_state.forward();
-        
+
         // Get the value.
         let representation = hidden_state.value();
 
         Ok(ImplicitLSTMUser {
-            user_embedding: representation.as_slice().unwrap().to_owned()
+            user_embedding: representation.as_slice().unwrap().to_owned(),
         })
     }
     fn predict(
@@ -279,7 +281,6 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         user: &Self::UserRepresentation,
         item_ids: &[ItemId],
     ) -> Result<Vec<f32>, &'static str> {
-
         let item_embeddings = &self.params.item_embedding;
         let item_biases = &self.params.item_biases;
 
@@ -322,20 +323,23 @@ mod tests {
 
         let mut rng = rand::XorShiftRng::from_seed([42; 4]);
 
-        let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
+        let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.5);
 
         println!("Train: {}, test: {}", train.len(), test.len());
 
-        let mut model = Hyperparameters::new(train.num_items(), 100).build();
+        let mut model = Hyperparameters::new(train.num_items(), 10).build();
 
-        let num_epochs = 50;
+        let num_epochs = 300;
+        let all_mat = data.to_compressed();
+        let train_mat = train.to_compressed();
         let test_mat = test.to_compressed();
 
         for _ in 0..num_epochs {
-            println!(
-                "Loss: {}",
-                model.fit(&train.to_compressed()).unwrap()
-            );
+            println!("Loss: {}", model.fit(&test_mat).unwrap());
+            let mrr = mrr_score(&model, &test_mat).unwrap();
+            println!("Test MRR {}", mrr);
+            let mrr = mrr_score(&model, &train_mat).unwrap();
+            println!("Train MRR {}", mrr);
         }
         let mrr = mrr_score(&model, &train.to_compressed()).unwrap();
         println!("MRR {}", mrr);
@@ -345,19 +349,19 @@ mod tests {
         //assert!(mrr > 0.065);
     }
 
-//     #[bench]
-//     fn bench_movielens(b: &mut Bencher) {
-//         let data = load_movielens("data.csv");
-//         let num_epochs = 2;
+    //     #[bench]
+    //     fn bench_movielens(b: &mut Bencher) {
+    //         let data = load_movielens("data.csv");
+    //         let num_epochs = 2;
 
-//         let mut model = ImplicitFactorizationModel::default();
+    //         let mut model = ImplicitFactorizationModel::default();
 
-//         let data = data.to_triplet();
+    //         let data = data.to_triplet();
 
-//         model.fit(&data, num_epochs).unwrap();
+    //         model.fit(&data, num_epochs).unwrap();
 
-//         b.iter(|| {
-//             model.fit(&data, num_epochs).unwrap();
-//         });
-//     }
+    //         b.iter(|| {
+    //             model.fit(&data, num_epochs).unwrap();
+    //         });
+    //     }
 }

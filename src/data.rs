@@ -9,7 +9,7 @@ use siphasher::sip::SipHasher;
 
 use super::{ItemId, Timestamp, UserId};
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, Eq, Hash, PartialEq)]
 pub struct Interaction {
     user_id: UserId,
     item_id: ItemId,
@@ -256,6 +256,28 @@ impl CompressedInteractions {
     pub fn shape(&self) -> (usize, usize) {
         (self.num_users, self.num_items)
     }
+
+    pub fn to_interactions(&self) -> Interactions {
+        let mut interactions = Vec::new();
+
+        for user in self.iter_users() {
+            for (&item_id, &timestamp) in izip!(user.item_ids, user.timestamps) {
+                interactions.push(Interaction {
+                    user_id: user.user_id,
+                    item_id: item_id,
+                    timestamp: timestamp,
+                });
+            }
+        }
+
+        interactions.shrink_to_fit();
+
+        Interactions {
+            num_users: self.num_users,
+            num_items: self.num_items,
+            interactions: interactions,
+        }
+    }
 }
 
 pub struct CompressedInteractionsUserIterator<'a> {
@@ -413,6 +435,61 @@ impl<'a> From<&'a Interactions> for TripletInteractions {
             user_ids: user_ids,
             item_ids: item_ids,
             timestamps: timestamps,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use rand;
+    use rand::distributions::{IndependentSample, Range};
+    use rand::Rng;
+
+    use super::*;
+
+    #[test]
+    fn to_compressed() {
+        let num_users = 20;
+        let num_items = 20;
+        let num_interactions = 100;
+
+        let user_range = Range::new(0, num_users);
+        let item_range = Range::new(0, num_items);
+        let timestamp_range = Range::new(0, 50);
+
+        let mut rng = rand::thread_rng();
+
+        let interactions: Vec<_> = (0..num_interactions)
+            .map(|_| Interaction {
+                user_id: user_range.ind_sample(&mut rng),
+                item_id: item_range.ind_sample(&mut rng),
+                timestamp: timestamp_range.ind_sample(&mut rng),
+            })
+            .collect();
+
+        let mut interaction_set = HashSet::with_capacity(interactions.len());
+        for interaction in &interactions {
+            interaction_set.insert(interaction.clone());
+        }
+
+        let mut interactions = Interactions {
+            num_users: num_users,
+            num_items: num_items,
+            interactions: interactions,
+        };
+        let (train, test) = user_based_split(&mut interactions,
+                                             &mut rng,
+                                             0.5);
+
+        let train = train.to_compressed().to_interactions();
+        let test = test.to_compressed().to_interactions();
+        
+        assert!(train.len() + test.len() == interaction_set.len());
+
+        for interaction in train.data().iter().chain(test.data().iter()) {
+            assert!(interaction_set.contains(interaction));
         }
     }
 }

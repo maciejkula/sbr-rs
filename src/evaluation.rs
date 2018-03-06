@@ -13,7 +13,6 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
 
     let mrrs: Vec<f32> = test.iter_users().collect::<Vec<_>>()
         .par_iter()
-        //.iter()
         .filter_map(|test_user| {
             if test_user.item_ids.is_empty() {
                 return None;
