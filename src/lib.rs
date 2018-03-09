@@ -27,7 +27,7 @@ pub type ItemId = usize;
 pub type Timestamp = usize;
 
 pub trait OnlineRankingModel {
-    type UserRepresentation;
+    type UserRepresentation: std::fmt::Debug;
     fn user_representation(
         &self,
         item_ids: &[ItemId],

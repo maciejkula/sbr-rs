@@ -20,7 +20,7 @@ siphasher = "0.2.2"
 wyrm = { path = "../wyrm", features = ["fast-math"] }
 
 [profile.release]
-lto = true
+lto = false
 
 [profile.bench]
 lto = true

@@ -11,10 +11,11 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
 ) -> Result<f32, &'static str> {
     let item_ids: Vec<usize> = (0..test.num_items()).collect();
 
-    let mrrs: Vec<f32> = test.iter_users().collect::<Vec<_>>()
+    let mrrs: Vec<f32> = test.iter_users()
+        .collect::<Vec<_>>()
         .par_iter()
         .filter_map(|test_user| {
-            if test_user.item_ids.is_empty() {
+            if test_user.item_ids.len() < 2 {
                 return None;
             }
 
@@ -22,7 +23,6 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
             let test_item = *test_user.item_ids.last().unwrap();
 
             let user_embedding = model.user_representation(train_items).unwrap();
-
             let mut predictions = model.predict(&user_embedding, &item_ids).unwrap();
 
             for &train_item_id in train_items {
@@ -33,6 +33,8 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
             let mut rank = 0;
 
             for &prediction in &predictions {
+                assert!(prediction.is_normal());
+                
                 if prediction >= test_score {
                     rank += 1;
                 }

@@ -16,6 +16,7 @@ pub struct Interaction {
     timestamp: Timestamp,
 }
 
+
 impl Interaction {
     pub fn new(user_id: UserId, item_id: ItemId, timestamp: Timestamp) -> Self {
         Interaction {

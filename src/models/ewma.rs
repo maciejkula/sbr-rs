@@ -11,14 +11,18 @@ use rand::{Rng, SeedableRng, XorShiftRng};
 use ndarray::Axis;
 
 use wyrm;
-use wyrm::nn;
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
 use super::super::{ItemId, OnlineRankingModel};
 use data::CompressedInteractions;
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
-    let normal = Normal::new(0.0, (2.0 / cols as f64).sqrt());
+    let normal = Normal::new(0.0, 1.0 / cols as f64);
+    Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
+}
+
+fn dense_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
+    let normal = Normal::new(0.0, (2.0 / (rows + cols) as f64).sqrt());
     Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
 }
 
@@ -28,6 +32,7 @@ pub struct Hyperparameters {
     max_sequence_length: usize,
     item_embedding_dim: usize,
     learning_rate: f32,
+    l2_penalty: f32,
     rng: XorShiftRng,
     num_threads: usize,
     num_epochs: usize,
@@ -38,8 +43,9 @@ impl Hyperparameters {
         Hyperparameters {
             num_items: num_items,
             max_sequence_length: max_sequence_length,
-            item_embedding_dim: 16,
-            learning_rate: 0.1,
+            item_embedding_dim: 32,
+            learning_rate: 0.0005,
+            l2_penalty: 0.0,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
@@ -52,6 +58,7 @@ impl Hyperparameters {
             max_sequence_length: Range::new(2, 40).ind_sample(rng),
             item_embedding_dim: Range::new(4, 64).ind_sample(rng),
             learning_rate: (2.0f32).powf(-Range::new(1.0, 8.0).ind_sample(rng)),
+            l2_penalty: (2.0f32).powf(-Range::new(4.0, 16.0).ind_sample(rng)),
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: Range::new(1, 64).ind_sample(rng),
@@ -66,18 +73,34 @@ impl Hyperparameters {
         )));
 
         let item_biases = Arc::new(wyrm::HogwildParameter::new(Arr::zeros((self.num_items, 1))));
+        let alpha = Arc::new(wyrm::HogwildParameter::new(Arr::zeros((
+            1,
+            self.item_embedding_dim,
+        ))));
+        let fc1 = Arc::new(wyrm::HogwildParameter::new(dense_init(
+            self.item_embedding_dim,
+            self.item_embedding_dim,
+            &mut self.rng,
+        )));
+        let fc2 = Arc::new(wyrm::HogwildParameter::new(dense_init(
+            self.item_embedding_dim,
+            self.item_embedding_dim,
+            &mut self.rng,
+        )));
 
         Parameters {
             item_embedding: item_embeddings,
             item_biases: item_biases,
-            lstm: nn::lstm::Parameters::new(self.item_embedding_dim, self.item_embedding_dim),
+            alpha: alpha,
+            fc1: fc1,
+            fc2: fc2,
         }
     }
 
-    pub fn build(mut self) -> ImplicitLSTMModel {
+    pub fn build(mut self) -> ImplicitEWMAModel {
         let params = self.build_params();
 
-        ImplicitLSTMModel {
+        ImplicitEWMAModel {
             hyper: self,
             params: params,
         }
@@ -88,7 +111,9 @@ impl Hyperparameters {
 struct Parameters {
     item_embedding: Arc<wyrm::HogwildParameter>,
     item_biases: Arc<wyrm::HogwildParameter>,
-    lstm: nn::lstm::Parameters,
+    alpha: Arc<wyrm::HogwildParameter>,
+    fc1: Arc<wyrm::HogwildParameter>,
+    fc2: Arc<wyrm::HogwildParameter>,
 }
 
 impl Clone for Parameters {
@@ -96,7 +121,9 @@ impl Clone for Parameters {
         Parameters {
             item_embedding: Arc::new(self.item_embedding.as_ref().clone()),
             item_biases: Arc::new(self.item_biases.as_ref().clone()),
-            lstm: self.lstm.clone(),
+            alpha: Arc::new(self.alpha.as_ref().clone()),
+            fc1: Arc::new(self.alpha.as_ref().clone()),
+            fc2: Arc::new(self.alpha.as_ref().clone()),
         }
     }
 }
@@ -105,6 +132,11 @@ impl Parameters {
     fn build(&self, max_sequence_length: usize) -> Model {
         let item_embeddings = wyrm::ParameterNode::shared(self.item_embedding.clone());
         let item_biases = wyrm::ParameterNode::shared(self.item_biases.clone());
+        let alpha = wyrm::ParameterNode::shared(self.alpha.clone());
+        // let alpha = wyrm::InputNode::new(Arr::zeros((1, self.item_embedding.value().cols())));
+        // alpha.set_value(1.0);
+        // let fc1 = wyrm::ParameterNode::shared(self.fc1.clone());
+        // let fc2 = wyrm::ParameterNode::shared(self.fc2.clone());
 
         let inputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); max_sequence_length];
         let outputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); max_sequence_length];
@@ -131,26 +163,47 @@ impl Parameters {
             .map(|negative| item_biases.index(negative))
             .collect();
 
-        let layer = self.lstm.build();
-        let hidden = layer.forward(&input_embeddings);
+        let ones = wyrm::InputNode::new(Arr::zeros((
+            self.alpha.value().rows(),
+            self.alpha.value().cols(),
+        )));
+        ones.set_value(1.0);
+
+        let alpha = alpha.sigmoid();
+        let one_minus_alpha = ones - alpha.clone();
+
+        let mut states = Vec::with_capacity(max_sequence_length);
+        let initial_state = input_embeddings.first().unwrap().clone().boxed();
+        states.push(initial_state);
+        for input in &input_embeddings[1..] {
+            let previous_state = states.last().unwrap().clone();
+            states.push(
+                (alpha.clone() * previous_state + one_minus_alpha.clone() * input.clone()).boxed()
+            );
+        }
+
+        // let states: Vec<_> = states
+        //     .into_iter()
+        //     .map(|state| state.dot(&fc1).boxed())//.sigmoid().dot(&fc2).boxed())
+        //     .collect();
 
         let positive_predictions: Vec<_> =
-            izip!(hidden.iter(), output_embeddings.iter(), output_biases)
-                .map(|(hidden_state, output_embedding, output_bias)| {
-                    hidden_state.vector_dot(output_embedding) + output_bias
+            izip!(states.iter(), output_embeddings.iter(), output_biases)
+                .map(|(state, output_embedding, output_bias)| {
+                    state.vector_dot(output_embedding) + output_bias
                 })
                 .collect();
         let negative_predictions: Vec<_> =
-            izip!(hidden.iter(), negative_embeddings.iter(), negative_biases)
-                .map(|(hidden_state, negative_embedding, negative_bias)| {
-                    hidden_state.vector_dot(negative_embedding) + negative_bias
+            izip!(states.iter(), negative_embeddings.iter(), negative_biases)
+                .map(|(state, negative_embedding, negative_bias)| {
+                    state.vector_dot(negative_embedding) + negative_bias
                 })
                 .collect();
 
         let losses: Vec<_> = positive_predictions
             .into_iter()
             .zip(negative_predictions.into_iter())
-            .map(|(pos, neg)| (neg - pos).sigmoid().boxed())
+            .map(|(pos, neg)| (-(pos - neg).sigmoid()).boxed())
             .collect();
 
         let mut summed_losses = Vec::with_capacity(losses.len());
@@ -165,7 +218,7 @@ impl Parameters {
             inputs: inputs,
             outputs: outputs,
             negatives: negatives,
-            hidden_states: hidden,
+            states: states,
             losses: losses,
             summed_losses: summed_losses,
         }
@@ -176,18 +229,18 @@ struct Model {
     inputs: Vec<Variable<wyrm::IndexInputNode>>,
     outputs: Vec<Variable<wyrm::IndexInputNode>>,
     negatives: Vec<Variable<wyrm::IndexInputNode>>,
-    hidden_states: Vec<Variable<BoxedNode>>,
+    states: Vec<Variable<BoxedNode>>,
     losses: Vec<Variable<BoxedNode>>,
     summed_losses: Vec<Variable<BoxedNode>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ImplicitLSTMModel {
+pub struct ImplicitEWMAModel {
     hyper: Hyperparameters,
     params: Parameters,
 }
 
-impl ImplicitLSTMModel {
+impl ImplicitEWMAModel {
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, &'static str> {
         let negative_item_range = Range::new(0, interactions.num_items());
         // TODO: parallelism
@@ -197,7 +250,7 @@ impl ImplicitLSTMModel {
         let mut optimizer = wyrm::Adagrad::new(
             self.hyper.learning_rate,
             model.losses.last().unwrap().parameters(),
-        );
+        ).l2_penalty(self.hyper.l2_penalty);
 
         let mut loss_value = 0.0;
 
@@ -216,12 +269,18 @@ impl ImplicitLSTMModel {
                     self.hyper.max_sequence_length,
                 )..];
 
+                //let mut foo = item_ids.to_owned();
+                // self.hyper.rng.shuffle(&mut foo);
+
+                //let item_ids = &foo;
+
                 // Sample negatives.
                 for neg_idx in &mut negatives[..item_ids.len()] {
                     *neg_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
                 }
 
                 // Set all the inputs.
+                // println!("=========");
                 for (&input_idx, &output_idx, &negative_idx, input, output, negative) in izip!(
                     item_ids,
                     &item_ids[1..],
@@ -233,14 +292,20 @@ impl ImplicitLSTMModel {
                     input.set_value(input_idx);
                     output.set_value(output_idx);
                     negative.set_value(negative_idx);
+                    // println!("input {} output {} negative {}",
+                    //          input_idx,
+                    //          output_idx,
+                    //          negative_idx);
                 }
 
                 // Get the loss at the end of the sequence.
-                let loss = &mut model.summed_losses[item_ids.len().saturating_sub(1)];
+                let loss_idx = item_ids.len().saturating_sub(2);
+                let loss = &mut model.summed_losses[loss_idx];
+                // println!("Output at loss idx {:#?}", model.outputs[loss_idx].value());
 
                 loss.zero_gradient();
                 loss.forward();
-                loss.backward(1.0 / (item_ids.len() - 1) as f32);
+                loss.backward(1.0 / (loss_idx + 1) as f32);
                 optimizer.step();
 
                 loss_value += loss.value().scalar_sum();
@@ -255,7 +320,7 @@ pub struct ImplicitLSTMUser {
     user_embedding: Vec<f32>,
 }
 
-impl OnlineRankingModel for ImplicitLSTMModel {
+impl OnlineRankingModel for ImplicitEWMAModel {
     type UserRepresentation = ImplicitLSTMUser;
     fn user_representation(
         &self,
@@ -271,15 +336,15 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         }
 
         // Select the hidden state after ingesting all the inputs.
-        let hidden_state = &model.hidden_states[item_ids.len() - 1];
+        let state = &model.states[item_ids.len().saturating_sub(1)];
 
         // Run the network forward up to that point. Remember to reset
         // the cached state.
-        hidden_state.zero_gradient();
-        hidden_state.forward();
+        state.zero_gradient();
+        state.forward();
 
         // Get the value.
-        let representation = hidden_state.value();
+        let representation = state.value();
 
         Ok(ImplicitLSTMUser {
             user_embedding: representation.as_slice().unwrap().to_owned(),
@@ -344,7 +409,7 @@ mod tests {
         let test_mat = test.to_compressed();
 
         for _ in 0..num_epochs {
-            println!("Loss: {}", model.fit(&test_mat).unwrap());
+            println!("Loss: {}", model.fit(&train_mat).unwrap());
             let mrr = mrr_score(&model, &test_mat).unwrap();
             println!("Test MRR {}", mrr);
             let mrr = mrr_score(&model, &train_mat).unwrap();
