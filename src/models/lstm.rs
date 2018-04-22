@@ -39,11 +39,16 @@ impl Hyperparameters {
             num_items: num_items,
             max_sequence_length: max_sequence_length,
             item_embedding_dim: 16,
-            learning_rate: 0.1,
+            learning_rate: 0.01,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
         }
+    }
+
+    pub fn learning_rate(mut self, learning_rate: f32) -> Self {
+        self.learning_rate = learning_rate;
+        self
     }
 
     pub fn random<R: Rng>(num_items: usize, rng: &mut R) -> Self {
@@ -332,11 +337,13 @@ mod tests {
 
         let mut rng = rand::XorShiftRng::from_seed([42; 4]);
 
-        let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.5);
+        let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
 
         println!("Train: {}, test: {}", train.len(), test.len());
 
-        let mut model = Hyperparameters::new(train.num_items(), 10).build();
+        let mut model = Hyperparameters::new(train.num_items(), 10)
+            .learning_rate(0.1)
+            .build();
 
         let num_epochs = 300;
         let all_mat = data.to_compressed();
@@ -344,7 +351,7 @@ mod tests {
         let test_mat = test.to_compressed();
 
         for _ in 0..num_epochs {
-            println!("Loss: {}", model.fit(&test_mat).unwrap());
+            println!("Loss: {}", model.fit(&train_mat).unwrap());
             let mrr = mrr_score(&model, &test_mat).unwrap();
             println!("Test MRR {}", mrr);
             let mrr = mrr_score(&model, &train_mat).unwrap();

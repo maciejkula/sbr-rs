@@ -2,11 +2,11 @@ use std;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rayon;
-use rayon::prelude::*;
 use rand;
 use rand::distributions::{IndependentSample, Range};
 use rand::{Rng, SeedableRng, XorShiftRng};
+use rayon;
+use rayon::prelude::*;
 
 use ndarray::Axis;
 
@@ -347,8 +347,8 @@ mod tests {
         let mut rng = rand::XorShiftRng::from_seed([42; 4]);
 
         let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
-
-        println!("Train: {}, test: {}", train.len(), test.len());
+        let train_mat = train.to_compressed();
+        let test_mat = test.to_compressed();
 
         let hyper = HyperparametersBuilder::default()
             .learning_rate(0.5)
@@ -362,13 +362,15 @@ mod tests {
         let num_epochs = 50;
 
         let mut model = ImplicitFactorizationModel::new(hyper);
+        let train_triplet = train.to_triplet();
 
-        println!(
-            "Loss: {}",
-            model.fit(&train.to_triplet(), num_epochs).unwrap()
-        );
-
-        let test_mat = test.to_compressed();
+        for _ in 0..num_epochs {
+            println!("Loss: {}", model.fit(&train_triplet, 1).unwrap());
+            let mrr = mrr_score(&model, &test_mat).unwrap();
+            println!("Test MRR {}", mrr);
+            let mrr = mrr_score(&model, &train_mat).unwrap();
+            println!("Train MRR {}", mrr);
+        }
 
         let mrr = mrr_score(&model, &test_mat).unwrap();
 

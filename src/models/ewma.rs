@@ -1,5 +1,6 @@
-// use std;
+use std;
 // use std::rc::Rc;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use rayon;
@@ -11,6 +12,7 @@ use rand::{Rng, SeedableRng, XorShiftRng};
 use ndarray::Axis;
 
 use wyrm;
+use wyrm::nn::xavier_normal;
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
 use super::super::{ItemId, OnlineRankingModel};
@@ -19,6 +21,7 @@ use data::CompressedInteractions;
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     let normal = Normal::new(0.0, 1.0 / cols as f64);
     Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
+    // Arr::zeros((rows, cols)).map(|_| (rng.gen::<f32>() - 0.5) / (cols as f32).sqrt())
 }
 
 fn dense_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
@@ -50,6 +53,21 @@ impl Hyperparameters {
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
         }
+    }
+
+    pub fn learning_rate(mut self, learning_rate: f32) -> Self {
+        self.learning_rate = learning_rate;
+        self
+    }
+
+    pub fn l2_penalty(mut self, l2_penalty: f32) -> Self {
+        self.l2_penalty = l2_penalty;
+        self
+    }
+
+    pub fn embedding_dim(mut self, embedding_dim: usize) -> Self {
+        self.item_embedding_dim = embedding_dim;
+        self
     }
 
     pub fn random<R: Rng>(num_items: usize, rng: &mut R) -> Self {
@@ -135,7 +153,7 @@ impl Parameters {
         let alpha = wyrm::ParameterNode::shared(self.alpha.clone());
         // let alpha = wyrm::InputNode::new(Arr::zeros((1, self.item_embedding.value().cols())));
         // alpha.set_value(1.0);
-        // let fc1 = wyrm::ParameterNode::shared(self.fc1.clone());
+        let fc1 = wyrm::ParameterNode::shared(self.fc1.clone());
         // let fc2 = wyrm::ParameterNode::shared(self.fc2.clone());
 
         let inputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); max_sequence_length];
@@ -178,7 +196,7 @@ impl Parameters {
         for input in &input_embeddings[1..] {
             let previous_state = states.last().unwrap().clone();
             states.push(
-                (alpha.clone() * previous_state + one_minus_alpha.clone() * input.clone()).boxed()
+                (alpha.clone() * previous_state + one_minus_alpha.clone() * input.clone()).boxed(),
             );
         }
 
@@ -201,9 +219,11 @@ impl Parameters {
                 .collect();
 
         let losses: Vec<_> = positive_predictions
-            .into_iter()
-            .zip(negative_predictions.into_iter())
-            .map(|(pos, neg)| (-(pos - neg).sigmoid()).boxed())
+            .iter()
+            .cloned()
+            .zip(negative_predictions.iter().cloned())
+            //.map(|(pos, neg)| (1.0 - (pos - neg).sigmoid()).boxed())
+            .map(|(pos, neg)| (1.0 - pos + neg).relu().boxed())
             .collect();
 
         let mut summed_losses = Vec::with_capacity(losses.len());
@@ -218,6 +238,8 @@ impl Parameters {
             inputs: inputs,
             outputs: outputs,
             negatives: negatives,
+            positive_predictions: positive_predictions.iter().map(|x| x.boxed()).collect(),
+            negative_predictions: negative_predictions.iter().map(|x| x.boxed()).collect(),
             states: states,
             losses: losses,
             summed_losses: summed_losses,
@@ -229,6 +251,8 @@ struct Model {
     inputs: Vec<Variable<wyrm::IndexInputNode>>,
     outputs: Vec<Variable<wyrm::IndexInputNode>>,
     negatives: Vec<Variable<wyrm::IndexInputNode>>,
+    positive_predictions: Vec<Variable<BoxedNode>>,
+    negative_predictions: Vec<Variable<BoxedNode>>,
     states: Vec<Variable<BoxedNode>>,
     losses: Vec<Variable<BoxedNode>>,
     summed_losses: Vec<Variable<BoxedNode>>,
@@ -246,11 +270,11 @@ impl ImplicitEWMAModel {
         // TODO: parallelism
 
         let mut model = self.params.build(self.hyper.max_sequence_length);
-        let mut negatives = vec![0; self.hyper.max_sequence_length];
         let mut optimizer = wyrm::Adagrad::new(
             self.hyper.learning_rate,
             model.losses.last().unwrap().parameters(),
-        ).l2_penalty(self.hyper.l2_penalty);
+        ).l2_penalty(self.hyper.l2_penalty)
+            .clamp(-5.0, 5.0);
 
         let mut loss_value = 0.0;
 
@@ -260,7 +284,7 @@ impl ImplicitEWMAModel {
             .collect();
 
         for _ in 0..self.hyper.num_epochs {
-            self.hyper.rng.shuffle(&mut data);
+            // self.hyper.rng.shuffle(&mut data);
 
             for user in &data {
                 // Cap item_ids to be at most `max_sequence_length` elements,
@@ -274,21 +298,16 @@ impl ImplicitEWMAModel {
 
                 //let item_ids = &foo;
 
-                // Sample negatives.
-                for neg_idx in &mut negatives[..item_ids.len()] {
-                    *neg_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
-                }
-
                 // Set all the inputs.
                 // println!("=========");
-                for (&input_idx, &output_idx, &negative_idx, input, output, negative) in izip!(
+                for (&input_idx, &output_idx, input, output, negative) in izip!(
                     item_ids,
                     &item_ids[1..],
-                    &negatives,
                     &mut model.inputs,
                     &mut model.outputs,
                     &mut model.negatives
                 ) {
+                    let negative_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
                     input.set_value(input_idx);
                     output.set_value(output_idx);
                     negative.set_value(negative_idx);
@@ -301,16 +320,46 @@ impl ImplicitEWMAModel {
                 // Get the loss at the end of the sequence.
                 let loss_idx = item_ids.len().saturating_sub(2);
                 let loss = &mut model.summed_losses[loss_idx];
-                // println!("Output at loss idx {:#?}", model.outputs[loss_idx].value());
+                // let loss = &mut model.losses[loss_idx];
 
                 loss.zero_gradient();
                 loss.forward();
                 loss.backward(1.0 / (loss_idx + 1) as f32);
                 optimizer.step();
 
-                loss_value += loss.value().scalar_sum();
+                if rand::thread_rng().gen::<f64>() > 10.999 {
+                    println!(
+                        "Positive {positive} negative {negative}, loss {loss}",
+                        positive = model.positive_predictions[loss_idx]
+                            .value()
+                            .deref()
+                            .scalar_sum(),
+                        negative = model.negative_predictions[loss_idx]
+                            .value()
+                            .deref()
+                            .scalar_sum(),
+                        loss = model.losses[loss_idx].value().deref().scalar_sum(),
+                    );
+                    println!(
+                        "Max embedding {}",
+                        self.params
+                            .item_embedding
+                            .value()
+                            .as_slice()
+                            .unwrap()
+                            .iter()
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap()
+                    );
+                    // println!("Last state: {:#?}", model.states[loss_idx].value());
+                }
+
+                loss_value += loss.value().scalar_sum() / ((loss_idx + 1) as f32);
             }
         }
+
+        println!("Alpha {:#?}", self.params.alpha.value());
+
         Ok(loss_value / self.hyper.num_epochs as f32)
     }
 }
@@ -397,19 +446,56 @@ mod tests {
 
         let mut rng = rand::XorShiftRng::from_seed([42; 4]);
 
-        let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.5);
+        let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
 
         println!("Train: {}, test: {}", train.len(), test.len());
 
-        let mut model = Hyperparameters::new(train.num_items(), 10).build();
+        let mut model = Hyperparameters::new(train.num_items(), 32)
+            .embedding_dim(8)
+            .l2_penalty(1e-6)
+            .learning_rate(0.01)
+            .build();
 
-        let num_epochs = 300;
+        let num_epochs = 100;
         let all_mat = data.to_compressed();
         let train_mat = train.to_compressed();
         let test_mat = test.to_compressed();
 
+        let train_items = train_mat
+            .iter_users()
+            .flat_map(|x| x.item_ids.last())
+            .collect::<std::collections::HashSet<_>>();
+        let test_items = test_mat
+            .iter_users()
+            .flat_map(|x| x.item_ids.last())
+            .collect::<std::collections::HashSet<_>>();
+
+        println!(
+            "Train size {}, test size {}, intersection size: {:#?}",
+            train_items.len(),
+            test_items.len(),
+            train_items.intersection(&test_items).count(),
+        );
+
+        let train_items = train_mat
+            .iter_users()
+            .flat_map(|x| x.item_ids)
+            .collect::<std::collections::HashSet<_>>();
+        let test_items = test_mat
+            .iter_users()
+            .flat_map(|x| x.item_ids)
+            .collect::<std::collections::HashSet<_>>();
+
+        println!(
+            "ALL ITEMS: Train size {}, test size {}, intersection size: {:#?}",
+            train_items.len(),
+            test_items.len(),
+            train_items.intersection(&test_items).count(),
+        );
+
         for _ in 0..num_epochs {
             println!("Loss: {}", model.fit(&train_mat).unwrap());
+            // println!("Loss: {}", model.fit(&all_mat).unwrap());
             let mrr = mrr_score(&model, &test_mat).unwrap();
             println!("Test MRR {}", mrr);
             let mrr = mrr_score(&model, &train_mat).unwrap();

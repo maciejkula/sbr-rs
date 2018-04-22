@@ -16,7 +16,6 @@ pub struct Interaction {
     timestamp: Timestamp,
 }
 
-
 impl Interaction {
     pub fn new(user_id: UserId, item_id: ItemId, timestamp: Timestamp) -> Self {
         Interaction {
@@ -178,7 +177,12 @@ fn cmp_timestamp(x: &Interaction, y: &Interaction) -> Ordering {
     let uid_comparison = x.user_id().cmp(&y.user_id());
 
     if uid_comparison == Ordering::Equal {
-        x.timestamp().cmp(&y.timestamp())
+        let time_comparison = x.timestamp().cmp(&y.timestamp());
+        if time_comparison == Ordering::Equal {
+            x.item_id().cmp(&y.item_id())
+        } else {
+            time_comparison
+        }
     } else {
         uid_comparison
     }
@@ -480,13 +484,11 @@ mod tests {
             num_items: num_items,
             interactions: interactions,
         };
-        let (train, test) = user_based_split(&mut interactions,
-                                             &mut rng,
-                                             0.5);
+        let (train, test) = user_based_split(&mut interactions, &mut rng, 0.5);
 
         let train = train.to_compressed().to_interactions();
         let test = test.to_compressed().to_interactions();
-        
+
         assert!(train.len() + test.len() == interaction_set.len());
 
         for interaction in train.data().iter().chain(test.data().iter()) {
