@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rayon;
 // use rayon::prelude::*;
 use rand;
-use rand::distributions::{IndependentSample, Normal, Range};
+use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample};
 use rand::{Rng, SeedableRng, XorShiftRng};
 
 use ndarray::Axis;
@@ -22,12 +22,13 @@ fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
 }
 
-#[derive(Builder, Clone, Debug)]
+#[derive(Builder, Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     num_items: usize,
     max_sequence_length: usize,
     item_embedding_dim: usize,
     learning_rate: f32,
+    l2_penalty: f32,
     rng: XorShiftRng,
     num_threads: usize,
     num_epochs: usize,
@@ -40,6 +41,7 @@ impl Hyperparameters {
             max_sequence_length: max_sequence_length,
             item_embedding_dim: 16,
             learning_rate: 0.01,
+            l2_penalty: 0.0,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
@@ -57,6 +59,7 @@ impl Hyperparameters {
             max_sequence_length: Range::new(2, 40).ind_sample(rng),
             item_embedding_dim: Range::new(4, 64).ind_sample(rng),
             learning_rate: (2.0f32).powf(-Range::new(1.0, 8.0).ind_sample(rng)),
+            l2_penalty: Exp::new(1e8).sample(rng) as f32,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: Range::new(1, 64).ind_sample(rng),
@@ -202,7 +205,8 @@ impl ImplicitLSTMModel {
         let mut optimizer = wyrm::Adagrad::new(
             self.hyper.learning_rate,
             model.losses.last().unwrap().parameters(),
-        );
+        ).l2_penalty(self.hyper.l2_penalty)
+            .clamp(-5.0, 5.0);
 
         let mut loss_value = 0.0;
 

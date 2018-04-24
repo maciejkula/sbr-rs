@@ -33,12 +33,6 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
             let mut rank = 0;
 
             for &prediction in &predictions {
-                // if !prediction.is_normal() {
-                //     println!(
-                //         "user repr {:#?} predictions {:#?}, prediction {}",
-                //         &user_embedding, &predictions, prediction,
-                //     );
-                // }
                 assert!(prediction.is_finite());
 
                 if prediction >= test_score {
