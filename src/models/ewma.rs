@@ -29,7 +29,7 @@ fn dense_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
 }
 
-#[derive(Builder, Clone, Debug)]
+#[derive(Builder, Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     num_items: usize,
     max_sequence_length: usize,
@@ -358,7 +358,7 @@ impl ImplicitEWMAModel {
             }
         }
 
-        println!("Alpha {:#?}", self.params.alpha.value());
+        // println!("Alpha {:#?}", self.params.alpha.value());
 
         Ok(loss_value / self.hyper.num_epochs as f32)
     }
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn fold_in() {
-        let mut data = load_movielens("data.csv");
+        let mut data = load_movielens("data_1M.csv");
 
         let mut rng = rand::XorShiftRng::from_seed([42; 4]);
 
@@ -495,7 +495,7 @@ mod tests {
 
         for _ in 0..num_epochs {
             println!("Loss: {}", model.fit(&train_mat).unwrap());
-            // println!("Loss: {}", model.fit(&all_mat).unwrap());
+            //println!("Loss: {}", model.fit(&all_mat).unwrap());
             let mrr = mrr_score(&model, &test_mat).unwrap();
             println!("Test MRR {}", mrr);
             let mrr = mrr_score(&model, &train_mat).unwrap();

@@ -333,7 +333,7 @@ pub struct TripletInteractions {
     num_users: usize,
     num_items: usize,
     user_ids: Vec<UserId>,
-    item_ids: Vec<ItemId>,
+    pub item_ids: Vec<ItemId>,
     timestamps: Vec<Timestamp>,
 }
 

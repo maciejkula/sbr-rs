@@ -1,21 +1,51 @@
 extern crate csv;
 extern crate rand;
+extern crate serde;
+extern crate serde_json;
 extern crate wheedle;
 extern crate wyrm;
+#[macro_use]
+extern crate serde_derive;
 
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
 
 use rand::distributions::{IndependentSample, Range};
 // use rand::{Rng, SeedableRng, XorShiftRng};
 
-use wheedle::data::{user_based_split, Interaction, Interactions, TripletInteractions};
-use wheedle::models::factorization;
+use wheedle::data::{train_test_split, user_based_split, Interaction, Interactions,
+                    TripletInteractions};
 use wheedle::evaluation::mrr_score;
+use wheedle::models::factorization;
 
+#[derive(Deserialize, Serialize)]
+struct GoodbooksInteraction {
+    user_id: usize,
+    book_id: usize,
+    rating: usize,
+}
+
+fn load_goodbooks(path: &str) -> Interactions {
+    let mut reader = csv::Reader::from_path(path).unwrap();
+    let interactions: Vec<Interaction> = reader
+        .deserialize::<GoodbooksInteraction>()
+        .map(|x| x.unwrap())
+        .enumerate()
+        .map(|(i, x)| Interaction::new(x.user_id, x.book_id, i))
+        .take(100_000)
+        .collect();
+
+    Interactions::from(interactions)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Result {
-    mrr: f32,
+    test_mrr: f32,
+    train_mrr: f32,
     elapsed: Duration,
-    num_epochs: usize,
     hyperparameters: factorization::Hyperparameters,
 }
 
@@ -29,63 +59,50 @@ fn load_movielens(path: &str) -> Interactions {
 fn fit(
     train: &TripletInteractions,
     hyper: factorization::Hyperparameters,
-    num_epochs: usize,
 ) -> factorization::ImplicitFactorizationModel {
     let mut model = factorization::ImplicitFactorizationModel::new(hyper);
-    model.fit(train, num_epochs).unwrap();
+    model.fit(train).unwrap();
 
     model
 }
 
 fn main() {
-    let mut data = load_movielens("data.csv");
+    //let mut data = load_movielens("data.csv");
+    let mut data = load_goodbooks("ratings.csv");
     let mut rng = rand::thread_rng();
 
-    let epochs = Range::new(10, 100);
-    let fold_in_epochs = Range::new(10, 100);
-    let learning_rates = Range::new(1.0, 4.0);
-    let latent_dims = Range::new(16, 128);
-    let minibatch_sizes = Range::new(1, 128);
+    let (mut train, test) = user_based_split(&mut data, &mut rng, 0.2);
+    //let (mut train, test) = train_test_split(&mut data, &mut rng, 0.2);
 
-    let mut results = Vec::new();
+    train.shuffle(&mut rng);
 
     for _ in 0..100 {
-        let hyper = factorization::HyperparametersBuilder::default()
-            .learning_rate((2.0_f32).powf(-learning_rates.ind_sample(&mut rng)))
-            .fold_in_epochs(fold_in_epochs.ind_sample(&mut rng))
-            .latent_dim(latent_dims.ind_sample(&mut rng))
-            .minibatch_size(minibatch_sizes.ind_sample(&mut rng))
-            .build()
-            .unwrap();
+        let mut results: Vec<Result> = File::open("factorization_results.json")
+            .map(|file| serde_json::from_reader(&file).unwrap())
+            .unwrap_or(Vec::new());
 
-        let num_epochs = epochs.ind_sample(&mut rng);
+        let hyper = factorization::Hyperparameters::random(&mut rng);
 
-        let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
+        let start = Instant::now();
+        let model = fit(&train.to_triplet(), hyper.clone());
+        let result = Result {
+            train_mrr: mrr_score(&model, &train.to_compressed()).unwrap(),
+            test_mrr: mrr_score(&model, &test.to_compressed()).unwrap(),
+            elapsed: start.elapsed(),
+            hyperparameters: hyper,
+        };
 
-        let mut elapsed = Duration::new(0, 0);
+        println!("{:#?}", result);
 
-        let mrr: f32 = (0..3)
-            .map(|_| {
-                let start = Instant::now();
-                let model = fit(&train.to_triplet(), hyper.clone(), num_epochs);
-                elapsed += start.elapsed();
-                mrr_score(&model, &test.to_compressed()).unwrap()
-            })
-            .sum::<f32>() / 3.0;
-
-        println!(
-            "MRR {} for hyperparams: {:#?} and epochs {} (elapsed {:#?})",
-            mrr,
-            &hyper,
-            num_epochs,
-            elapsed / 3
-        );
-
-        if !mrr.is_nan() {
-            results.push((mrr, num_epochs, hyper));
-            results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        if !result.test_mrr.is_nan() {
+            results.push(result);
+            results.sort_by(|a, b| a.test_mrr.partial_cmp(&b.test_mrr).unwrap());
         }
 
         println!("Best result: {:#?}", results.last());
+
+        File::create("factorization_results.json")
+            .map(|file| serde_json::to_writer_pretty(&file, &results).unwrap())
+            .unwrap();
     }
 }

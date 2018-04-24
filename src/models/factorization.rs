@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use rand;
-use rand::distributions::{IndependentSample, Range};
+use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
 use rayon::prelude::*;
@@ -17,10 +17,13 @@ use super::super::{ItemId, OnlineRankingModel};
 use data::TripletInteractions;
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
-    Arr::zeros((rows, cols)).map(|_| rng.gen::<f32>() / (cols as f32).sqrt())
+    let normal = Normal::new(0.0, 1.0 / cols as f64);
+    Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
+    // let mut range = Range::new(-0.5, 0.5);
+    // Arr::zeros((rows, cols)).map(|_| range.sample(rng) / (cols as f32).sqrt())
 }
 
-#[derive(Builder, Clone, Debug)]
+#[derive(Builder, Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     #[builder(default = "16")]
     latent_dim: usize,
@@ -28,12 +31,38 @@ pub struct Hyperparameters {
     minibatch_size: usize,
     #[builder(default = "0.01")]
     learning_rate: f32,
+    #[builder(default = "0.0")]
+    l2_penalty: f32,
     #[builder(default = "50")]
     fold_in_epochs: usize,
+    #[builder(default = "50")]
+    num_epochs: usize,
     #[builder(default = "XorShiftRng::from_seed(rand::thread_rng().gen())")]
     rng: XorShiftRng,
     #[builder(default = "rayon::current_num_threads()")]
     num_threads: usize,
+}
+
+impl Hyperparameters {
+    pub fn random<R: Rng>(rng: &mut R) -> Self {
+        Hyperparameters {
+            latent_dim: Range::new(4, 64).ind_sample(rng),
+            minibatch_size: Range::new(4, 64).ind_sample(rng),
+            learning_rate: Exp::new(0.5e2).sample(rng) as f32,
+            l2_penalty: Exp::new(1e8).sample(rng) as f32,
+            fold_in_epochs: Range::new(16, 64).ind_sample(rng),
+            num_epochs: Range::new(16, 64).ind_sample(rng),
+            rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
+            num_threads: rayon::current_num_threads(),
+        }
+    }
+
+    pub fn build(self) -> ImplicitFactorizationModel {
+        ImplicitFactorizationModel {
+            hyper: self,
+            model: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -67,7 +96,7 @@ impl Parameters {
             user_vector.vector_dot(&negative_item_vector) + negative_item_bias;
 
         let score_diff = positive_prediction - negative_prediciton;
-        let loss = -score_diff.sigmoid();
+        let loss = 1.0 - score_diff.sigmoid();
 
         Model {
             user_idx: user_idx,
@@ -189,11 +218,7 @@ impl ImplicitFactorizationModel {
             &mut self.hyper.rng,
         )));
 
-        let item_biases = Arc::new(wyrm::HogwildParameter::new(embedding_init(
-            num_items,
-            1,
-            &mut self.hyper.rng,
-        )));
+        let item_biases = Arc::new(wyrm::HogwildParameter::new(Arr::zeros((num_items, 1))));
 
         Parameters {
             num_users: num_users,
@@ -211,7 +236,7 @@ impl ImplicitFactorizationModel {
 
         let negative_item_range = Range::new(0, self.model.as_ref().unwrap().num_items);
         let minibatch_size = 1;
-        let mut rng = rand::XorShiftRng::from_seed([42; 4]);
+        let mut rng = rand::XorShiftRng::from_seed(rand::thread_rng().gen());
 
         let user_vector = Arc::new(wyrm::HogwildParameter::new(embedding_init(
             1,
@@ -224,7 +249,8 @@ impl ImplicitFactorizationModel {
             .unwrap()
             .build(user_vector.clone(), minibatch_size);
         let mut optimizer =
-            wyrm::Adagrad::new(self.hyper.learning_rate, vec![model.user_embeddings]);
+            wyrm::Adagrad::new(self.hyper.learning_rate, vec![model.user_embeddings])
+                .l2_penalty(self.hyper.l2_penalty);
 
         model.user_idx.set_value(0);
 
@@ -248,11 +274,7 @@ impl ImplicitFactorizationModel {
         Ok(user_vec.as_slice().unwrap().to_owned())
     }
 
-    pub fn fit(
-        &mut self,
-        interactions: &TripletInteractions,
-        num_epochs: usize,
-    ) -> Result<f32, &'static str> {
+    pub fn fit(&mut self, interactions: &TripletInteractions) -> Result<f32, &'static str> {
         let minibatch_size = self.hyper.minibatch_size;
 
         if self.model.is_none() {
@@ -261,9 +283,9 @@ impl ImplicitFactorizationModel {
 
         let negative_item_range = Range::new(0, interactions.num_items());
         let num_partitions = self.hyper.num_threads;
-        let seeds: Vec<[u32; 4]> = (0..num_partitions).map(|_| self.hyper.rng.gen()).collect();
+        let seeds: Vec<[u8; 16]> = (0..num_partitions).map(|_| self.hyper.rng.gen()).collect();
 
-        let partitions: Vec<_> = interactions
+        let mut partitions: Vec<_> = interactions
             .iter_minibatch_partitioned(minibatch_size, num_partitions)
             .into_iter()
             .zip(seeds.into_iter())
@@ -278,7 +300,8 @@ impl ImplicitFactorizationModel {
                 );
 
                 let mut optimizer =
-                    wyrm::Adagrad::new(self.hyper.learning_rate, model.loss.parameters());
+                    wyrm::Adagrad::new(self.hyper.learning_rate, model.loss.parameters())
+                        .l2_penalty(self.hyper.l2_penalty);
 
                 let mut batch_negatives = vec![0; minibatch_size];
 
@@ -287,7 +310,7 @@ impl ImplicitFactorizationModel {
 
                 let mut num_observations = 0;
 
-                for _ in 0..num_epochs {
+                for _ in 0..self.hyper.num_epochs {
                     for batch in data.clone() {
                         if batch.len() < minibatch_size {
                             break;
@@ -306,7 +329,7 @@ impl ImplicitFactorizationModel {
                             .set_value(batch_negatives.as_slice());
 
                         model.loss.forward();
-                        model.loss.backward(1.0);
+                        model.loss.backward(1.0 / (batch.len() as f32));
 
                         loss_value += model.loss.value().scalar_sum();
 
@@ -388,7 +411,7 @@ mod tests {
 
         let data = data.to_triplet();
 
-        model.fit(&data, num_epochs).unwrap();
+        model.fit(&data).unwrap();
 
         b.iter(|| {
             model.fit(&data, num_epochs).unwrap();
