@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rayon;
 // use rayon::prelude::*;
 use rand;
-use rand::distributions::{IndependentSample, Normal, Range};
+use rand::distributions::{IndependentSample, Normal, Range, Sample};
 use rand::{Rng, SeedableRng, XorShiftRng};
 
 use ndarray::Axis;
@@ -36,6 +36,7 @@ pub struct Hyperparameters {
     item_embedding_dim: usize,
     learning_rate: f32,
     l2_penalty: f32,
+    sequence_dropout: f32,
     rng: XorShiftRng,
     num_threads: usize,
     num_epochs: usize,
@@ -49,6 +50,7 @@ impl Hyperparameters {
             item_embedding_dim: 32,
             learning_rate: 0.0005,
             l2_penalty: 0.0,
+            sequence_dropout: 0.0,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
@@ -77,6 +79,7 @@ impl Hyperparameters {
             item_embedding_dim: Range::new(4, 64).ind_sample(rng),
             learning_rate: (2.0f32).powf(-Range::new(1.0, 8.0).ind_sample(rng)),
             l2_penalty: (2.0f32).powf(-Range::new(4.0, 16.0).ind_sample(rng)),
+            sequence_dropout: Range::new(0.05, 0.5).sample(rng) as f32,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: Range::new(1, 64).ind_sample(rng),
@@ -293,6 +296,21 @@ impl ImplicitEWMAModel {
                     self.hyper.max_sequence_length,
                 )..];
 
+                let sampled_item_ids: Vec<_> = item_ids
+                    .iter()
+                    .filter(|_| {
+                        Range::new(0.0, 1.0).sample(&mut rand::thread_rng())
+                            > self.hyper.sequence_dropout
+                    })
+                    .cloned()
+                    .collect();
+
+                let item_ids = &sampled_item_ids;
+
+                if item_ids.len() < 2 {
+                    continue;
+                }
+
                 //let mut foo = item_ids.to_owned();
                 // self.hyper.rng.shuffle(&mut foo);
 
@@ -356,6 +374,8 @@ impl ImplicitEWMAModel {
 
                 loss_value += loss.value().scalar_sum() / ((loss_idx + 1) as f32);
             }
+
+            // optimizer.decay_weights(1e-3);
         }
 
         // println!("Alpha {:#?}", self.params.alpha.value());
