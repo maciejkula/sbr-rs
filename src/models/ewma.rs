@@ -3,11 +3,11 @@ use std;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use rayon;
-// use rayon::prelude::*;
 use rand;
 use rand::distributions::{IndependentSample, Normal, Range, Sample};
 use rand::{Rng, SeedableRng, XorShiftRng};
+use rayon;
+use rayon::prelude::*;
 
 use ndarray::Axis;
 
@@ -72,6 +72,11 @@ impl Hyperparameters {
         self
     }
 
+    pub fn num_epochs(mut self, num_epochs: usize) -> Self {
+        self.num_epochs = num_epochs;
+        self
+    }
+
     pub fn random<R: Rng>(num_items: usize, rng: &mut R) -> Self {
         Hyperparameters {
             num_items: num_items,
@@ -110,6 +115,7 @@ impl Hyperparameters {
         )));
 
         Parameters {
+            max_sequence_length: self.max_sequence_length,
             item_embedding: item_embeddings,
             item_biases: item_biases,
             alpha: alpha,
@@ -130,6 +136,7 @@ impl Hyperparameters {
 
 #[derive(Debug)]
 struct Parameters {
+    max_sequence_length: usize,
     item_embedding: Arc<wyrm::HogwildParameter>,
     item_biases: Arc<wyrm::HogwildParameter>,
     alpha: Arc<wyrm::HogwildParameter>,
@@ -140,6 +147,7 @@ struct Parameters {
 impl Clone for Parameters {
     fn clone(&self) -> Self {
         Parameters {
+            max_sequence_length: self.max_sequence_length,
             item_embedding: Arc::new(self.item_embedding.as_ref().clone()),
             item_biases: Arc::new(self.item_biases.as_ref().clone()),
             alpha: Arc::new(self.alpha.as_ref().clone()),
@@ -150,7 +158,7 @@ impl Clone for Parameters {
 }
 
 impl Parameters {
-    fn build(&self, max_sequence_length: usize) -> Model {
+    fn build(&self) -> Model {
         let item_embeddings = wyrm::ParameterNode::shared(self.item_embedding.clone());
         let item_biases = wyrm::ParameterNode::shared(self.item_biases.clone());
         let alpha = wyrm::ParameterNode::shared(self.alpha.clone());
@@ -159,9 +167,9 @@ impl Parameters {
         let fc1 = wyrm::ParameterNode::shared(self.fc1.clone());
         // let fc2 = wyrm::ParameterNode::shared(self.fc2.clone());
 
-        let inputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); max_sequence_length];
-        let outputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); max_sequence_length];
-        let negatives = vec![wyrm::IndexInputNode::new(&vec![0; 1]); max_sequence_length];
+        let inputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); self.max_sequence_length];
+        let outputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); self.max_sequence_length];
+        let negatives = vec![wyrm::IndexInputNode::new(&vec![0; 1]); self.max_sequence_length];
 
         let input_embeddings: Vec<_> = inputs
             .iter()
@@ -193,7 +201,7 @@ impl Parameters {
         let alpha = alpha.sigmoid();
         let one_minus_alpha = ones - alpha.clone();
 
-        let mut states = Vec::with_capacity(max_sequence_length);
+        let mut states = Vec::with_capacity(self.max_sequence_length);
         let initial_state = input_embeddings.first().unwrap().clone().boxed();
         states.push(initial_state);
         for input in &input_embeddings[1..] {
@@ -225,8 +233,8 @@ impl Parameters {
             .iter()
             .cloned()
             .zip(negative_predictions.iter().cloned())
-            //.map(|(pos, neg)| (1.0 - (pos - neg).sigmoid()).boxed())
-            .map(|(pos, neg)| (1.0 - pos + neg).relu().boxed())
+            .map(|(pos, neg)| (1.0 - (pos - neg).sigmoid()).boxed())
+            //.map(|(pos, neg)| (1.0 - pos + neg).relu().boxed())
             .collect();
 
         let mut summed_losses = Vec::with_capacity(losses.len());
@@ -272,115 +280,69 @@ impl ImplicitEWMAModel {
         let negative_item_range = Range::new(0, interactions.num_items());
         // TODO: parallelism
 
-        let mut model = self.params.build(self.hyper.max_sequence_length);
-        let mut optimizer = wyrm::Adagrad::new(
-            self.hyper.learning_rate,
-            model.losses.last().unwrap().parameters(),
-        ).l2_penalty(self.hyper.l2_penalty)
-            .clamp(-5.0, 5.0);
-
-        let mut loss_value = 0.0;
-
-        let mut data: Vec<_> = interactions
+        let data: Vec<_> = interactions
             .iter_users()
             .filter(|user| !user.is_empty())
             .collect();
 
+        let data: Vec<_> = data.chunks(data.len() / self.hyper.num_threads).collect();
+
+        let mut loss_value = 0.0;
+
         for _ in 0..self.hyper.num_epochs {
-            // self.hyper.rng.shuffle(&mut data);
+            loss_value = data.par_iter()
+                .map(|data| {
+                    let mut model = self.params.build();
+                    let mut optimizer = wyrm::Adagrad::new(
+                        self.hyper.learning_rate,
+                        model.losses.last().unwrap().parameters(),
+                    ).l2_penalty(self.hyper.l2_penalty)
+                        .clamp(-5.0, 5.0);
 
-            for user in &data {
-                // Cap item_ids to be at most `max_sequence_length` elements,
-                // cutting off early parts of the sequence if necessary.
-                let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
-                    self.hyper.max_sequence_length,
-                )..];
+                    data.iter()
+                        .flat_map(|user| {
+                            // Cap item_ids to be at most `max_sequence_length` elements,
+                            // cutting off early parts of the sequence if necessary.
+                            let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
+                                self.hyper.max_sequence_length,
+                            )..];
 
-                let sampled_item_ids: Vec<_> = item_ids
-                    .iter()
-                    .filter(|_| {
-                        Range::new(0.0, 1.0).sample(&mut rand::thread_rng())
-                            > self.hyper.sequence_dropout
-                    })
-                    .cloned()
-                    .collect();
+                            if item_ids.len() < 2 {
+                                return None;
+                            }
 
-                let item_ids = &sampled_item_ids;
+                            for (i, &input_idx, &output_idx, input, output, negative) in izip!(
+                                0..item_ids.len(),
+                                item_ids,
+                                &item_ids[1..],
+                                &mut model.inputs,
+                                &mut model.outputs,
+                                &mut model.negatives
+                            ) {
+                                let negative_idx =
+                                    negative_item_range.ind_sample(&mut rand::thread_rng());
+                                input.set_value(input_idx);
+                                output.set_value(output_idx);
+                                negative.set_value(negative_idx);
+                            }
 
-                if item_ids.len() < 2 {
-                    continue;
-                }
+                            // Get the loss at the end of the sequence.
+                            let loss_idx = item_ids.len().saturating_sub(2);
+                            let loss = &mut model.summed_losses[loss_idx];
 
-                //let mut foo = item_ids.to_owned();
-                // self.hyper.rng.shuffle(&mut foo);
+                            loss.zero_gradient();
+                            loss.forward();
+                            loss.backward(1.0 / (loss_idx + 1) as f32);
+                            optimizer.step();
 
-                //let item_ids = &foo;
-
-                // Set all the inputs.
-                // println!("=========");
-                for (&input_idx, &output_idx, input, output, negative) in izip!(
-                    item_ids,
-                    &item_ids[1..],
-                    &mut model.inputs,
-                    &mut model.outputs,
-                    &mut model.negatives
-                ) {
-                    let negative_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
-                    input.set_value(input_idx);
-                    output.set_value(output_idx);
-                    negative.set_value(negative_idx);
-                    // println!("input {} output {} negative {}",
-                    //          input_idx,
-                    //          output_idx,
-                    //          negative_idx);
-                }
-
-                // Get the loss at the end of the sequence.
-                let loss_idx = item_ids.len().saturating_sub(2);
-                let loss = &mut model.summed_losses[loss_idx];
-                // let loss = &mut model.losses[loss_idx];
-
-                loss.zero_gradient();
-                loss.forward();
-                loss.backward(1.0 / (loss_idx + 1) as f32);
-                optimizer.step();
-
-                if rand::thread_rng().gen::<f64>() > 10.999 {
-                    println!(
-                        "Positive {positive} negative {negative}, loss {loss}",
-                        positive = model.positive_predictions[loss_idx]
-                            .value()
-                            .deref()
-                            .scalar_sum(),
-                        negative = model.negative_predictions[loss_idx]
-                            .value()
-                            .deref()
-                            .scalar_sum(),
-                        loss = model.losses[loss_idx].value().deref().scalar_sum(),
-                    );
-                    println!(
-                        "Max embedding {}",
-                        self.params
-                            .item_embedding
-                            .value()
-                            .as_slice()
-                            .unwrap()
-                            .iter()
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap()
-                    );
-                    // println!("Last state: {:#?}", model.states[loss_idx].value());
-                }
-
-                loss_value += loss.value().scalar_sum() / ((loss_idx + 1) as f32);
-            }
-
-            // optimizer.decay_weights(1e-3);
+                            Some(loss.value().scalar_sum() / ((loss_idx + 1) as f32))
+                        })
+                        .sum::<f32>()
+                })
+                .sum();
         }
 
-        // println!("Alpha {:#?}", self.params.alpha.value());
-
-        Ok(loss_value / self.hyper.num_epochs as f32)
+        Ok(0.0)
     }
 }
 
@@ -395,7 +357,7 @@ impl OnlineRankingModel for ImplicitEWMAModel {
         &self,
         item_ids: &[ItemId],
     ) -> Result<Self::UserRepresentation, &'static str> {
-        let model = self.params.build(self.hyper.max_sequence_length);
+        let model = self.params.build();
         let item_ids = &item_ids[item_ids
                                      .len()
                                      .saturating_sub(self.hyper.max_sequence_length)..];
@@ -464,7 +426,7 @@ mod tests {
     fn fold_in() {
         let mut data = load_movielens("data_1M.csv");
 
-        let mut rng = rand::XorShiftRng::from_seed([42; 4]);
+        let mut rng = rand::XorShiftRng::from_seed([42; 16]);
 
         let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
 

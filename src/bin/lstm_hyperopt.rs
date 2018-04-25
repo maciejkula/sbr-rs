@@ -34,7 +34,7 @@ fn load_goodbooks(path: &str) -> Interactions {
         .map(|x| x.unwrap())
         .enumerate()
         .map(|(i, x)| Interaction::new(x.user_id, x.book_id, i))
-        .take(100_000)
+        //.take(100_000)
         .collect();
 
     Interactions::from(interactions)
@@ -63,8 +63,8 @@ fn fit(train: &CompressedInteractions, hyper: lstm::Hyperparameters) -> lstm::Im
 }
 
 fn main() {
-    // let mut data = load_goodbooks("ratings.csv");
-    let mut data = load_movielens("data.csv");
+    let mut data = load_goodbooks("ratings.csv");
+    // let mut data = load_movielens("data.csv");
     let mut rng = rand::thread_rng();
 
     let (train, test) = user_based_split(&mut data, &mut rng, 0.2);

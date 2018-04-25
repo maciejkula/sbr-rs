@@ -18,7 +18,7 @@ use super::super::{ItemId, OnlineRankingModel};
 use data::CompressedInteractions;
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
-    let normal = Normal::new(0.0, (2.0 / cols as f64).sqrt());
+    let normal = Normal::new(0.0, 1.0 / cols as f64);
     Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
 }
 
@@ -339,7 +339,7 @@ mod tests {
     fn fold_in() {
         let mut data = load_movielens("data.csv");
 
-        let mut rng = rand::XorShiftRng::from_seed([42; 4]);
+        let mut rng = rand::XorShiftRng::from_seed([42; 16]);
 
         let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
 
