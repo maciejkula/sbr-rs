@@ -215,9 +215,11 @@ impl ImplicitLSTMModel {
             .filter(|user| !user.is_empty())
             .collect();
 
-        let data: Vec<_> = data.chunks(data.len() / self.hyper.num_threads).collect();
+        let num_chunks = data.len() / self.hyper.num_threads;
 
-        data.par_iter().for_each(|data| {
+        let mut data: Vec<_> = data.chunks_mut(num_chunks).collect();
+
+        data.par_iter_mut().for_each(|mut data| {
             let mut model = self.params.build(self.hyper.max_sequence_length);
             let mut optimizer = wyrm::Adagrad::new(
                 self.hyper.learning_rate,
@@ -226,6 +228,7 @@ impl ImplicitLSTMModel {
                 .clamp(-5.0, 5.0);
 
             for _ in 0..self.hyper.num_epochs {
+                rand::thread_rng().shuffle(data);
                 for user in data.iter() {
                     // Cap item_ids to be at most `max_sequence_length` elements,
                     // cutting off early parts of the sequence if necessary.
