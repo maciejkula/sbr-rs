@@ -2,11 +2,11 @@
 // use std::rc::Rc;
 use std::sync::Arc;
 
-use rayon;
-// use rayon::prelude::*;
 use rand;
 use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample};
 use rand::{Rng, SeedableRng, XorShiftRng};
+use rayon;
+use rayon::prelude::*;
 
 use ndarray::Axis;
 
@@ -58,7 +58,7 @@ impl Hyperparameters {
             num_items: num_items,
             max_sequence_length: Range::new(2, 40).ind_sample(rng),
             item_embedding_dim: Range::new(4, 64).ind_sample(rng),
-            learning_rate: (2.0f32).powf(-Range::new(1.0, 8.0).ind_sample(rng)),
+            learning_rate: Exp::new(0.5e1).sample(rng) as f32,
             l2_penalty: Exp::new(1e8).sample(rng) as f32,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
@@ -215,47 +215,55 @@ impl ImplicitLSTMModel {
             .filter(|user| !user.is_empty())
             .collect();
 
-        for _ in 0..self.hyper.num_epochs {
-            self.hyper.rng.shuffle(&mut data);
+        let data: Vec<_> = data.chunks(data.len() / self.hyper.num_threads).collect();
 
-            for user in &data {
-                // Cap item_ids to be at most `max_sequence_length` elements,
-                // cutting off early parts of the sequence if necessary.
-                let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
-                    self.hyper.max_sequence_length,
-                )..];
+        data.par_iter().for_each(|data| {
+            let mut model = self.params.build(self.hyper.max_sequence_length);
+            let mut optimizer = wyrm::Adagrad::new(
+                self.hyper.learning_rate,
+                model.losses.last().unwrap().parameters(),
+            ).l2_penalty(self.hyper.l2_penalty)
+                .clamp(-5.0, 5.0);
 
-                // Sample negatives.
-                for neg_idx in &mut negatives[..item_ids.len()] {
-                    *neg_idx = negative_item_range.ind_sample(&mut self.hyper.rng);
+            for _ in 0..self.hyper.num_epochs {
+                for user in data.iter() {
+                    // Cap item_ids to be at most `max_sequence_length` elements,
+                    // cutting off early parts of the sequence if necessary.
+                    let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
+                        self.hyper.max_sequence_length,
+                    )..];
+
+                    if item_ids.len() < 2 {
+                        continue;
+                    }
+
+                    for (i, &input_idx, &output_idx, input, output, negative) in izip!(
+                        0..item_ids.len(),
+                        item_ids,
+                        &item_ids[1..],
+                        &mut model.inputs,
+                        &mut model.outputs,
+                        &mut model.negatives
+                    ) {
+                        let negative_idx = negative_item_range.ind_sample(&mut rand::thread_rng());
+                        input.set_value(input_idx);
+                        output.set_value(output_idx);
+                        negative.set_value(negative_idx);
+                    }
+
+                    // Get the loss at the end of the sequence.
+                    let loss_idx = item_ids.len().saturating_sub(2);
+                    let loss = &mut model.summed_losses[loss_idx];
+
+                    loss.forward();
+                    loss.backward(1.0 / (loss_idx + 1) as f32);
+                    optimizer.step();
+                    loss.zero_gradient();
                 }
-
-                // Set all the inputs.
-                for (&input_idx, &output_idx, &negative_idx, input, output, negative) in izip!(
-                    item_ids,
-                    &item_ids[1..],
-                    &negatives,
-                    &mut model.inputs,
-                    &mut model.outputs,
-                    &mut model.negatives
-                ) {
-                    input.set_value(input_idx);
-                    output.set_value(output_idx);
-                    negative.set_value(negative_idx);
-                }
-
-                // Get the loss at the end of the sequence.
-                let loss = &mut model.summed_losses[item_ids.len().saturating_sub(1)];
-
-                loss.zero_gradient();
-                loss.forward();
-                loss.backward(1.0 / (item_ids.len() - 1) as f32);
-                optimizer.step();
-
-                loss_value += loss.value().scalar_sum();
             }
-        }
-        Ok(loss_value / self.hyper.num_epochs as f32)
+        });
+
+        Ok(0.0)
     }
 }
 
