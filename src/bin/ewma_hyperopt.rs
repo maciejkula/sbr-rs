@@ -13,7 +13,7 @@ use std::io::{BufReader, Read};
 
 use std::time::{Duration, Instant};
 
-use rand::distributions::{IndependentSample, Range};
+use rand::distributions::{Exp, IndependentSample, Range, Sample};
 // use rand::{Rng, SeedableRng, XorShiftRng};
 
 use wheedle::data::{user_based_split, CompressedInteractions, Interaction, Interactions};
@@ -34,7 +34,7 @@ fn load_goodbooks(path: &str) -> Interactions {
         .map(|x| x.unwrap())
         .enumerate()
         .map(|(i, x)| Interaction::new(x.user_id, x.book_id, i))
-        //.take(1_000_000)
+        //.take(4_000_000)
         .collect();
 
     Interactions::from(interactions)
@@ -63,35 +63,41 @@ fn fit(train: &CompressedInteractions, hyper: ewma::Hyperparameters) -> ewma::Im
 }
 
 fn main() {
-    let mut data = load_movielens("data.csv");
-    // let mut data = load_goodbooks("ratings.csv");
+    // let mut data = load_movielens("data.csv");
+    let mut data = load_goodbooks("ratings.csv");
     let mut rng = rand::thread_rng();
 
     let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
 
+    println!("{:?}", (train.num_items(), train.num_users(), train.len()));
+
     let train = train.to_compressed();
     let test = test.to_compressed();
 
-    for _ in 0..100 {
+    for _ in 0..1000 {
         let mut results: Vec<Result> = File::open("ewma_results.json")
             .map(|file| serde_json::from_reader(&file).unwrap())
             .unwrap_or(Vec::new());
 
         let hyper = ewma::Hyperparameters::random(data.num_items(), &mut rng);
-        // let hyper = ewma::Hyperparameters::new(data.num_items(), 27)
-        //     .embedding_dim(32)
-        //     .learning_rate(0.3)
+        println!("Now running {:#?}", &hyper);
+        // let hyper = ewma::Hyperparameters::new(data.num_items(), 32)
+        //     .embedding_dim(256)
+        //     .learning_rate(0.003)
         //     .l2_penalty(0.0000)
-        //     .num_epochs(10);
+        //     .num_epochs(3);
 
         let start = Instant::now();
         let model = fit(&train, hyper.clone());
+        println!("Calculating results...");
+        let predictions_start = Instant::now();
         let result = Result {
             train_mrr: mrr_score(&model, &train).unwrap(),
             test_mrr: mrr_score(&model, &test).unwrap(),
             elapsed: start.elapsed(),
             hyperparameters: hyper.clone(),
         };
+        println!("Predicitons done in {:#?}", predictions_start.elapsed());
 
         println!("{:#?}", result);
 
