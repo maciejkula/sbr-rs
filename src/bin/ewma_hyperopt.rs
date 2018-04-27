@@ -63,8 +63,8 @@ fn fit(train: &CompressedInteractions, hyper: ewma::Hyperparameters) -> ewma::Im
 }
 
 fn main() {
-    // let mut data = load_movielens("data.csv");
-    let mut data = load_goodbooks("ratings.csv");
+    let mut data = load_movielens("data.csv");
+    // let mut data = load_goodbooks("ratings.csv");
     let mut rng = rand::thread_rng();
 
     let (train, test) = user_based_split(&mut data, &mut rng, 0.2);

@@ -48,7 +48,7 @@ impl Hyperparameters {
         Hyperparameters {
             latent_dim: Range::new(4, 64).ind_sample(rng),
             minibatch_size: Range::new(4, 64).ind_sample(rng),
-            learning_rate: Exp::new(0.5e2).sample(rng) as f32,
+            learning_rate: Exp::new(0.5e1).sample(rng) as f32,
             l2_penalty: Exp::new(1e8).sample(rng) as f32,
             fold_in_epochs: Range::new(16, 64).ind_sample(rng),
             num_epochs: Range::new(16, 64).ind_sample(rng),
@@ -254,8 +254,14 @@ impl ImplicitFactorizationModel {
 
         model.user_idx.set_value(0);
 
+        // shuffle
+        // println!("New user ---------------------------");
+        let mut interactions = interactions.to_owned();
+
         for _ in 0..self.hyper.fold_in_epochs {
-            for &item_id in interactions {
+            let mut loss = 0.0;
+            rng.shuffle(&mut interactions);
+            for &item_id in &interactions {
                 model.positive_item_idx.set_value(item_id);
                 model
                     .negative_item_idx
@@ -264,9 +270,13 @@ impl ImplicitFactorizationModel {
                 model.loss.forward();
                 model.loss.backward(1.0);
 
+                loss += model.loss.value().scalar_sum();
+
                 optimizer.step();
                 model.loss.zero_gradient();
             }
+
+            // println!("fold in loss {}", loss / interactions.len() as f32);
         }
 
         let user_vec = user_vector.value();
@@ -336,6 +346,9 @@ impl ImplicitFactorizationModel {
                         optimizer.step();
                         model.loss.zero_gradient();
                     }
+
+                    println!("loss {}", loss_value / num_observations as f32);
+                    loss_value = 0.0;
                 }
 
                 loss_value / num_observations as f32

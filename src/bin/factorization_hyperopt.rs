@@ -18,7 +18,7 @@ use rand::distributions::{IndependentSample, Range};
 
 use wheedle::data::{train_test_split, user_based_split, Interaction, Interactions,
                     TripletInteractions};
-use wheedle::evaluation::mrr_score;
+use wheedle::evaluation::*;
 use wheedle::models::factorization;
 
 #[derive(Deserialize, Serialize)]
@@ -61,18 +61,18 @@ fn fit(
     hyper: factorization::Hyperparameters,
 ) -> factorization::ImplicitFactorizationModel {
     let mut model = factorization::ImplicitFactorizationModel::new(hyper);
-    model.fit(train).unwrap();
+    println!("loss {}", model.fit(train).unwrap());
 
     model
 }
 
 fn main() {
-    //let mut data = load_movielens("data.csv");
-    let mut data = load_goodbooks("ratings.csv");
+    let mut data = load_movielens("data.csv");
+    // let mut data = load_goodbooks("ratings.csv");
     let mut rng = rand::thread_rng();
 
-    let (mut train, test) = user_based_split(&mut data, &mut rng, 0.2);
-    //let (mut train, test) = train_test_split(&mut data, &mut rng, 0.2);
+    // let (mut train, test) = user_based_split(&mut data, &mut rng, 0.2);
+    let (mut train, test) = train_test_split(&mut data, &mut rng, 0.2);
 
     train.shuffle(&mut rng);
 
@@ -82,11 +82,19 @@ fn main() {
             .unwrap_or(Vec::new());
 
         let hyper = factorization::Hyperparameters::random(&mut rng);
+        let hyper = factorization::HyperparametersBuilder::default()
+            .learning_rate(0.5)
+            .fold_in_epochs(50)
+            .latent_dim(32)
+            .num_epochs(50)
+            .l2_penalty(0.0)
+            .build()
+            .unwrap();
 
         let start = Instant::now();
         let model = fit(&train.to_triplet(), hyper.clone());
         let result = Result {
-            train_mrr: mrr_score(&model, &train.to_compressed()).unwrap(),
+            train_mrr: mrr_score_train(&model, &train.to_compressed()).unwrap(),
             test_mrr: mrr_score(&model, &test.to_compressed()).unwrap(),
             elapsed: start.elapsed(),
             hyperparameters: hyper,
