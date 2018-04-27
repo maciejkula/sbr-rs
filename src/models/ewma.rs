@@ -4,7 +4,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use rand;
-use rand::distributions::{IndependentSample, Normal, Range, Sample};
+use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
 use rayon::prelude::*;
@@ -80,10 +80,10 @@ impl Hyperparameters {
     pub fn random<R: Rng>(num_items: usize, rng: &mut R) -> Self {
         Hyperparameters {
             num_items: num_items,
-            max_sequence_length: Range::new(2, 40).ind_sample(rng),
-            item_embedding_dim: Range::new(4, 64).ind_sample(rng),
-            learning_rate: (2.0f32).powf(-Range::new(1.0, 8.0).ind_sample(rng)),
-            l2_penalty: (2.0f32).powf(-Range::new(4.0, 16.0).ind_sample(rng)),
+            max_sequence_length: Range::new(2, 32).ind_sample(rng),
+            item_embedding_dim: Range::new(32, 256).ind_sample(rng),
+            learning_rate: Exp::new(0.5e3).sample(rng) as f32,
+            l2_penalty: Exp::new(1e8).sample(rng) as f32,
             sequence_dropout: Range::new(0.05, 0.5).sample(rng) as f32,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
@@ -280,67 +280,64 @@ impl ImplicitEWMAModel {
         let negative_item_range = Range::new(0, interactions.num_items());
         // TODO: parallelism
 
-        let data: Vec<_> = interactions
+        let mut data: Vec<_> = interactions
             .iter_users()
             .filter(|user| !user.is_empty())
             .collect();
+        self.hyper.rng.shuffle(&mut data);
 
-        let data: Vec<_> = data.chunks(data.len() / self.hyper.num_threads).collect();
+        let num_chunks = data.len() / self.hyper.num_threads;
+
+        let mut data: Vec<_> = data.chunks_mut(num_chunks).collect();
 
         let mut loss_value = 0.0;
 
-        for _ in 0..self.hyper.num_epochs {
-            loss_value = data.par_iter()
-                .map(|data| {
-                    let mut model = self.params.build();
-                    let mut optimizer = wyrm::Adagrad::new(
-                        self.hyper.learning_rate,
-                        model.losses.last().unwrap().parameters(),
-                    ).l2_penalty(self.hyper.l2_penalty)
-                        .clamp(-5.0, 5.0);
+        data.par_iter_mut().for_each(|data| {
+            let mut model = self.params.build();
+            let mut optimizer = wyrm::Adagrad::new(
+                self.hyper.learning_rate,
+                model.losses.last().unwrap().parameters(),
+            ).l2_penalty(self.hyper.l2_penalty)
+                .clamp(-5.0, 5.0);
 
-                    data.iter()
-                        .flat_map(|user| {
-                            // Cap item_ids to be at most `max_sequence_length` elements,
-                            // cutting off early parts of the sequence if necessary.
-                            let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
-                                self.hyper.max_sequence_length,
-                            )..];
+            for _ in 0..self.hyper.num_epochs {
+                rand::thread_rng().shuffle(data);
+                for user in data.iter() {
+                    // Cap item_ids to be at most `max_sequence_length` elements,
+                    // cutting off early parts of the sequence if necessary.
+                    let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
+                        self.hyper.max_sequence_length,
+                    )..];
 
-                            if item_ids.len() < 2 {
-                                return None;
-                            }
+                    if item_ids.len() < 2 {
+                        continue;
+                    }
 
-                            for (i, &input_idx, &output_idx, input, output, negative) in izip!(
-                                0..item_ids.len(),
-                                item_ids,
-                                &item_ids[1..],
-                                &mut model.inputs,
-                                &mut model.outputs,
-                                &mut model.negatives
-                            ) {
-                                let negative_idx =
-                                    negative_item_range.ind_sample(&mut rand::thread_rng());
-                                input.set_value(input_idx);
-                                output.set_value(output_idx);
-                                negative.set_value(negative_idx);
-                            }
+                    for (i, &input_idx, &output_idx, input, output, negative) in izip!(
+                        0..item_ids.len(),
+                        item_ids,
+                        &item_ids[1..],
+                        &mut model.inputs,
+                        &mut model.outputs,
+                        &mut model.negatives
+                    ) {
+                        let negative_idx = negative_item_range.ind_sample(&mut rand::thread_rng());
+                        input.set_value(input_idx);
+                        output.set_value(output_idx);
+                        negative.set_value(negative_idx);
+                    }
 
-                            // Get the loss at the end of the sequence.
-                            let loss_idx = item_ids.len().saturating_sub(2);
-                            let loss = &mut model.summed_losses[loss_idx];
+                    // Get the loss at the end of the sequence.
+                    let loss_idx = item_ids.len().saturating_sub(2);
+                    let loss = &mut model.summed_losses[loss_idx];
 
-                            loss.zero_gradient();
-                            loss.forward();
-                            loss.backward(1.0 / (loss_idx + 1) as f32);
-                            optimizer.step();
-
-                            Some(loss.value().scalar_sum() / ((loss_idx + 1) as f32))
-                        })
-                        .sum::<f32>()
-                })
-                .sum();
-        }
+                    loss.forward();
+                    loss.backward(1.0 / (loss_idx + 1) as f32);
+                    optimizer.step();
+                    loss.zero_gradient();
+                }
+            }
+        });
 
         Ok(0.0)
     }
