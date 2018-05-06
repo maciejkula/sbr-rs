@@ -1,7 +1,9 @@
 use std;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::hash::Hasher;
 
+use rand;
 use rand::distributions::{IndependentSample, Range};
 use rand::Rng;
 
@@ -54,7 +56,7 @@ pub fn train_test_split<R: Rng>(
 }
 
 pub fn user_based_split<R: Rng>(
-    interactions: &mut Interactions,
+    interactions: &Interactions,
     rng: &mut R,
     test_fraction: f32,
 ) -> (Interactions, Interactions) {
@@ -70,6 +72,19 @@ pub fn user_based_split<R: Rng>(
         hasher.write_usize(user_id);
         hasher.finish() % denominator > train_cutoff
     };
+
+    let mut user_ids: Vec<_> = interactions.data().iter().map(|x| x.user_id()).collect();
+    user_ids.sort();
+    user_ids.dedup();
+
+    let mut test_user_ids = rand::seq::sample_slice(
+        rng,
+        &user_ids,
+        (test_fraction * user_ids.len() as f32) as usize,
+    );
+    let test_user_ids: HashSet<_> = test_user_ids.drain(..).collect();
+
+    let is_train = |x: &Interaction| test_user_ids.contains(&x.user_id());
 
     interactions.split_by(is_train)
 }
@@ -177,12 +192,13 @@ fn cmp_timestamp(x: &Interaction, y: &Interaction) -> Ordering {
     let uid_comparison = x.user_id().cmp(&y.user_id());
 
     if uid_comparison == Ordering::Equal {
-        let time_comparison = x.timestamp().cmp(&y.timestamp());
-        if time_comparison == Ordering::Equal {
-            x.item_id().cmp(&y.item_id())
-        } else {
-            time_comparison
-        }
+        x.timestamp().cmp(&y.timestamp())
+    // let time_comparison =
+    // if time_comparison == Ordering::Equal {
+    //     x.item_id().cmp(&y.item_id())
+    // } else {
+    //     time_comparison
+    // }
     } else {
         uid_comparison
     }
@@ -304,6 +320,14 @@ impl<'a> CompressedInteractionsUser<'a> {
     pub fn is_empty(&self) -> bool {
         self.item_ids.is_empty()
     }
+    pub fn chunks(&self, chunk_size: usize) -> CompressedInteractionsUserChunkIterator<'a> {
+        CompressedInteractionsUserChunkIterator {
+            idx: 0,
+            chunk_size: chunk_size,
+            item_ids: &self.item_ids[..],
+            timestamps: &self.timestamps[..],
+        }
+    }
 }
 
 impl<'a> Iterator for CompressedInteractionsUserIterator<'a> {
@@ -325,6 +349,41 @@ impl<'a> Iterator for CompressedInteractionsUserIterator<'a> {
         self.idx += 1;
 
         value
+    }
+}
+
+pub struct CompressedInteractionsUserChunkIterator<'a> {
+    idx: usize,
+    chunk_size: usize,
+    item_ids: &'a [ItemId],
+    timestamps: &'a [Timestamp],
+}
+
+impl<'a> Iterator for CompressedInteractionsUserChunkIterator<'a> {
+    type Item = (&'a [ItemId], &'a [Timestamp]);
+    fn next(&mut self) -> Option<Self::Item> {
+        let user_len = self.item_ids.len();
+
+        if self.idx >= user_len {
+            None
+        } else {
+            let chunk_size_mod = (user_len - self.idx) % self.chunk_size;
+            let chunk_size = if chunk_size_mod == 0 {
+                self.chunk_size
+            } else {
+                chunk_size_mod
+            };
+
+            let start_idx = self.idx;
+            let stop_idx = self.idx + chunk_size;
+
+            self.idx += chunk_size;
+
+            Some((
+                &self.item_ids[start_idx..stop_idx],
+                &self.timestamps[start_idx..stop_idx],
+            ))
+        }
     }
 }
 
@@ -495,4 +554,73 @@ mod tests {
             assert!(interaction_set.contains(interaction));
         }
     }
+
+    #[test]
+    fn test_chunk_iterator() {
+        let num_users = 1;
+        let num_items = 5;
+
+        let mut interactions = Vec::new();
+
+        for user in 0..num_users {
+            for item in 0..num_items {
+                interactions.push(Interaction::new(user, item, item));
+            }
+        }
+
+        let interactions = Interactions::from(interactions).to_compressed();
+
+        let chunks: Vec<_> = interactions
+            .iter_users()
+            .flat_map(|user| user.chunks(3))
+            .collect();
+
+        assert_eq!(chunks.len(), 2);
+
+        let expected = [
+            (vec![0, 1_usize], vec![0, 1_usize]),
+            (vec![2_usize, 3, 4], vec![2_usize, 3, 4]),
+        ];
+
+        chunks.iter().zip(expected.iter()).for_each(|(x, y)| {
+            assert_eq!(&x.0, &y.0.as_slice());
+            assert_eq!(&x.0, &y.1.as_slice());
+        });
+
+        //assert!(chunks == []);
+    }
+
+    // #[test]
+    // fn foo_bar() {
+    //     let mut interactions = Vec::new();
+
+    //     for user_id in 0..10 {
+    //         for item_id in 0..10 {
+    //             interactions.push(Interaction {
+    //                 user_id: user_id,
+    //                 item_id: item_id + 1000 * user_id,
+    //                 timestamp: item_id,
+    //             });
+    //         }
+    //     }
+
+    //     let interactions = Interactions {
+    //         num_users: 10,
+    //         num_items: interactions.iter().map(|x| x.item_id).max().unwrap() + 1,
+    //         interactions: interactions,
+    //     };
+
+    //     let mut rng = rand::thread_rng();
+    //     let (train, test) = user_based_split(&interactions, &mut rng, 0.5);
+
+    //     let train = train.to_compressed();
+    //     let test = test.to_compressed();
+
+    //     for user in train.iter_users() {
+    //         println!("Train {:#?}", user);
+    //     }
+    //     for user in test.iter_users() {
+    //         println!("Test {:#?}", user);
+    //     }
+    // }
 }

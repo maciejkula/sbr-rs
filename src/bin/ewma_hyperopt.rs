@@ -29,15 +29,15 @@ struct GoodbooksInteraction {
 
 fn load_goodbooks(path: &str) -> Interactions {
     let mut reader = csv::Reader::from_path(path).unwrap();
-    let interactions: Vec<Interaction> = reader
+    let mut interactions: Vec<Interaction> = reader
         .deserialize::<GoodbooksInteraction>()
         .map(|x| x.unwrap())
         .enumerate()
         .map(|(i, x)| Interaction::new(x.user_id, x.book_id, i))
-        //.take(4_000_000)
         .collect();
+    interactions.sort_by_key(|x| x.user_id());
 
-    Interactions::from(interactions)
+    Interactions::from(interactions[..1_000_000].to_owned())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ fn fit(train: &CompressedInteractions, hyper: ewma::Hyperparameters) -> ewma::Im
 }
 
 fn main() {
-    // let mut data = load_movielens("data.csv");
+    //let mut data = load_movielens("data.csv");
     let mut data = load_goodbooks("ratings.csv");
     let mut rng = rand::thread_rng();
 

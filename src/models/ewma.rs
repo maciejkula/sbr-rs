@@ -4,7 +4,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use rand;
-use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample};
+use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample, Uniform};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
 use rayon::prelude::*;
@@ -80,14 +80,14 @@ impl Hyperparameters {
     pub fn random<R: Rng>(num_items: usize, rng: &mut R) -> Self {
         Hyperparameters {
             num_items: num_items,
-            max_sequence_length: Range::new(2, 32).ind_sample(rng),
-            item_embedding_dim: Range::new(32, 256).ind_sample(rng),
-            learning_rate: Exp::new(0.5e3).sample(rng) as f32,
-            l2_penalty: Exp::new(1e8).sample(rng) as f32,
-            sequence_dropout: Range::new(0.05, 0.5).sample(rng) as f32,
+            max_sequence_length: 2_usize.pow(Uniform::new(4, 8).sample(rng)),
+            item_embedding_dim: 2_usize.pow(Uniform::new(4, 8).sample(rng)),
+            learning_rate: (10.0_f32).powf(Uniform::new(-5.0, 0.0).sample(rng)),
+            l2_penalty: (10.0_f32).powf(Uniform::new(-10.0, -4.0).sample(rng)),
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
-            num_epochs: Range::new(1, 64).ind_sample(rng),
+            num_epochs: 2_usize.pow(Uniform::new(4, 8).sample(rng)),
+            sequence_dropout: Range::new(0.05, 0.5).sample(rng) as f32,
         }
     }
 
@@ -167,9 +167,15 @@ impl Parameters {
         let fc1 = wyrm::ParameterNode::shared(self.fc1.clone());
         // let fc2 = wyrm::ParameterNode::shared(self.fc2.clone());
 
-        let inputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); self.max_sequence_length];
-        let outputs = vec![wyrm::IndexInputNode::new(&vec![0; 1]); self.max_sequence_length];
-        let negatives = vec![wyrm::IndexInputNode::new(&vec![0; 1]); self.max_sequence_length];
+        let inputs: Vec<_> = (0..self.max_sequence_length)
+            .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
+            .collect();
+        let outputs: Vec<_> = (0..self.max_sequence_length)
+            .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
+            .collect();
+        let negatives: Vec<_> = (0..self.max_sequence_length)
+            .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
+            .collect();
 
         let input_embeddings: Vec<_> = inputs
             .iter()
