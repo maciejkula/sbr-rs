@@ -82,9 +82,9 @@ pub fn mrr_score_train<T: OnlineRankingModel + Sync>(
 
             // println!("Predictions {:#?}", &predictions);
 
-            // for &train_item_id in train_items {
-            //     predictions[train_item_id] = std::f32::MIN;
-            // }
+            for &train_item_id in train_items {
+                predictions[train_item_id] = std::f32::MIN;
+            }
 
             let test_score = predictions[test_item];
             let mut rank = 0;

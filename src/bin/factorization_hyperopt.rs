@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 extern crate csv;
 extern crate rand;
 extern crate serde;
@@ -12,9 +16,6 @@ use std::io::{BufReader, Read};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-
-use rand::distributions::{IndependentSample, Range};
-// use rand::{Rng, SeedableRng, XorShiftRng};
 
 use wheedle::data::{train_test_split, user_based_split, Interaction, Interactions,
                     TripletInteractions};
@@ -51,7 +52,12 @@ struct Result {
 
 fn load_movielens(path: &str) -> Interactions {
     let mut reader = csv::Reader::from_path(path).unwrap();
-    let interactions: Vec<Interaction> = reader.deserialize().map(|x| x.unwrap()).collect();
+    let interactions: Vec<Interaction> = reader
+        .deserialize()
+        .map(|x| x.unwrap())
+        .map(|x: Interaction| Interaction::new(x.user_id(), x.item_id(), x.timestamp()))
+        .take(100_000)
+        .collect();
 
     Interactions::from(interactions)
 }
@@ -71,25 +77,28 @@ fn main() {
     // let mut data = load_goodbooks("ratings.csv");
     let mut rng = rand::thread_rng();
 
-    // let (mut train, test) = user_based_split(&mut data, &mut rng, 0.2);
-    let (mut train, test) = train_test_split(&mut data, &mut rng, 0.2);
+    let (mut train, test) = user_based_split(&mut data, &mut rng, 0.2);
+    // let (mut train, test) = train_test_split(&mut data, &mut rng, 0.2);
 
     train.shuffle(&mut rng);
 
-    for _ in 0..100 {
+    for _ in 0..1000 {
         let mut results: Vec<Result> = File::open("factorization_results.json")
             .map(|file| serde_json::from_reader(&file).unwrap())
             .unwrap_or(Vec::new());
 
         let hyper = factorization::Hyperparameters::random(&mut rng);
-        let hyper = factorization::HyperparametersBuilder::default()
-            .learning_rate(0.5)
-            .fold_in_epochs(50)
-            .latent_dim(32)
-            .num_epochs(50)
-            .l2_penalty(0.0)
-            .build()
-            .unwrap();
+        println!("Running {:#?}", &hyper);
+        // let hyper = factorization::HyperparametersBuilder::default()
+        //     .learning_rate(0.5)
+        //     .fold_in_epochs(50)
+        //     .latent_dim(32)
+        //     .num_epochs(50)
+        //     .l2_penalty(0.0)
+        //     .build()
+        //     .unwrap();
+
+        println!("Users {} items {}", train.num_users(), train.num_items());
 
         let start = Instant::now();
         let model = fit(&train.to_triplet(), hyper.clone());
@@ -104,6 +113,7 @@ fn main() {
 
         if !result.test_mrr.is_nan() {
             results.push(result);
+            //results.sort_by(|a, b| a.train_mrr.partial_cmp(&b.train_mrr).unwrap());
             results.sort_by(|a, b| a.test_mrr.partial_cmp(&b.test_mrr).unwrap());
         }
 

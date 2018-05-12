@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 extern crate csv;
 extern crate rand;
 extern crate wheedle;
@@ -13,7 +17,7 @@ use std::io::{BufReader, Read};
 
 use std::time::{Duration, Instant};
 
-use rand::distributions::{Exp, IndependentSample, Range, Sample};
+use rand::distributions::{Exp, Range};
 // use rand::{Rng, SeedableRng, XorShiftRng};
 
 use wheedle::data::{user_based_split, CompressedInteractions, Interaction, Interactions};

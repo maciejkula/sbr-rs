@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use rand;
-use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample};
+use rand::distributions::{Exp, IndependentSample, Normal, Range, Sample, Uniform};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
 use rayon::prelude::*;
@@ -11,16 +11,26 @@ use rayon::prelude::*;
 use ndarray::Axis;
 
 use wyrm;
+use wyrm::optim;
+use wyrm::optim::Optimizer as Optim;
 use wyrm::{Arr, DataInput};
 
 use super::super::{ItemId, OnlineRankingModel};
 use data::TripletInteractions;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Optimizer {
+    Adagrad,
+    Adam,
+}
+
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
-    let normal = Normal::new(0.0, 1.0 / cols as f64);
-    Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
+    // let normal = Normal::new(0.0, 1.0 / cols as f64);
+    // Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
     // let mut range = Range::new(-0.5, 0.5);
     // Arr::zeros((rows, cols)).map(|_| range.sample(rng) / (cols as f32).sqrt())
+    let mut distribution = Uniform::new(-0.5 / cols as f32, 0.5 / cols as f32);
+    Arr::zeros((rows, cols)).map(|_| distribution.sample(rng))
 }
 
 #[derive(Builder, Clone, Debug, Serialize, Deserialize)]
@@ -41,19 +51,26 @@ pub struct Hyperparameters {
     rng: XorShiftRng,
     #[builder(default = "rayon::current_num_threads()")]
     num_threads: usize,
+    #[builder(default = "Optimizer::Adagrad")]
+    optimizer: Optimizer,
 }
 
 impl Hyperparameters {
     pub fn random<R: Rng>(rng: &mut R) -> Self {
         Hyperparameters {
-            latent_dim: Range::new(4, 64).ind_sample(rng),
-            minibatch_size: Range::new(4, 64).ind_sample(rng),
-            learning_rate: Exp::new(0.5e1).sample(rng) as f32,
-            l2_penalty: Exp::new(1e8).sample(rng) as f32,
-            fold_in_epochs: Range::new(16, 64).ind_sample(rng),
-            num_epochs: Range::new(16, 64).ind_sample(rng),
+            latent_dim: 2_usize.pow(Range::new(4, 9).ind_sample(rng)),
+            minibatch_size: 2_usize.pow(Uniform::new(1, 6).sample(rng)),
+            learning_rate: (10.0_f32).powf(Uniform::new(-3.0, 1.0).sample(rng)),
+            l2_penalty: (10.0_f32).powf(Uniform::new(-5.0, -3.0).sample(rng)),
+            fold_in_epochs: 2_usize.pow(Uniform::new(3, 6).sample(rng)),
+            num_epochs: 2_usize.pow(Uniform::new(3, 6).sample(rng)),
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
+            optimizer: if rng.gen::<f32>() < 0.5 {
+                Optimizer::Adam
+            } else {
+                Optimizer::Adagrad
+            },
         }
     }
 
@@ -248,15 +265,30 @@ impl ImplicitFactorizationModel {
             .as_ref()
             .unwrap()
             .build(user_vector.clone(), minibatch_size);
-        let mut optimizer =
-            wyrm::Adagrad::new(self.hyper.learning_rate, vec![model.user_embeddings])
-                .l2_penalty(self.hyper.l2_penalty);
+
+        let mut optimizer = wyrm::Adagrad::new(self.hyper.learning_rate, model.loss.parameters())
+            .l2_penalty(self.hyper.l2_penalty);
+
+        // let optimizer = match self.hyper.optimizer {
+        //     Optimizer::Adagrad => Box::new(
+        //         wyrm::Adagrad::new(self.hyper.learning_rate, model.loss.parameters())
+        //             .l2_penalty(self.hyper.l2_penalty)
+        //             .clamp(-3.0, 3.0),
+        //     ) as Box<Optim>,
+        //     Optimizer::Adam => Box::new(
+        //         optim::Adam::new(model.loss.parameters())
+        //             .learning_rate(self.hyper.learning_rate)
+        //             .l2_penalty(self.hyper.l2_penalty)
+        //             .clamp(-3.0, 3.0),
+        //     ) as Box<Optim>,
+        // };
 
         model.user_idx.set_value(0);
 
-        // shuffle
-        // println!("New user ---------------------------");
         let mut interactions = interactions.to_owned();
+
+        // Really this should use minibatches of the same size as the main
+        // fitting loop.
 
         for _ in 0..self.hyper.fold_in_epochs {
             let mut loss = 0.0;
@@ -275,8 +307,6 @@ impl ImplicitFactorizationModel {
                 optimizer.step();
                 model.loss.zero_gradient();
             }
-
-            // println!("fold in loss {}", loss / interactions.len() as f32);
         }
 
         let user_vec = user_vector.value();
@@ -292,6 +322,7 @@ impl ImplicitFactorizationModel {
         }
 
         let negative_item_range = Range::new(0, interactions.num_items());
+        // let negative_item_range = Range::new(0, interactions.len());
         let num_partitions = self.hyper.num_threads;
         let seeds: Vec<[u8; 16]> = (0..num_partitions).map(|_| self.hyper.rng.gen()).collect();
 
@@ -329,6 +360,8 @@ impl ImplicitFactorizationModel {
                         num_observations += batch.len();
 
                         for negative in &mut batch_negatives {
+                            //*negative =
+                            //interactions.item_ids[negative_item_range.ind_sample(&mut rng)];
                             *negative = negative_item_range.ind_sample(&mut rng);
                         }
 
@@ -347,7 +380,7 @@ impl ImplicitFactorizationModel {
                         model.loss.zero_gradient();
                     }
 
-                    println!("loss {}", loss_value / num_observations as f32);
+                    // println!("loss {}", loss_value / num_observations as f32);
                     loss_value = 0.0;
                 }
 

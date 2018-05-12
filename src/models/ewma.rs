@@ -1,5 +1,3 @@
-use std;
-// use std::rc::Rc;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -12,7 +10,7 @@ use rayon::prelude::*;
 use ndarray::Axis;
 
 use wyrm;
-use wyrm::nn::xavier_normal;
+use wyrm::optim::Optimizer;
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
 use super::super::{ItemId, OnlineRankingModel};
