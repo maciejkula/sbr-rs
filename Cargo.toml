@@ -31,5 +31,5 @@ name = "benchmark"
 harness = false
 
 [profile.bench]
-lto = false
+lto = true
 debug = true

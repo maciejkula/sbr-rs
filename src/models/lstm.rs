@@ -296,8 +296,7 @@ impl ImplicitLSTMModel {
         match self.hyper.optimizer {
             Optimizer::Adagrad => Box::new({
                 let opt = wyrm::Adagrad::new(self.hyper.learning_rate, parameters)
-                    .l2_penalty(self.hyper.l2_penalty)
-                    .clamp(-1.0, 1.0);
+                    .l2_penalty(self.hyper.l2_penalty);
 
                 if self.hyper.parallelism == Parallelism::Synchronous {
                     opt.synchronized(barrier)
@@ -308,8 +307,7 @@ impl ImplicitLSTMModel {
             Optimizer::Adam => Box::new({
                 let opt = optim::Adam::new(parameters)
                     .learning_rate(self.hyper.learning_rate)
-                    .l2_penalty(self.hyper.l2_penalty)
-                    .clamp(-1.0, 1.0);
+                    .l2_penalty(self.hyper.l2_penalty);
 
                 if self.hyper.parallelism == Parallelism::Synchronous {
                     opt.synchronized(barrier)

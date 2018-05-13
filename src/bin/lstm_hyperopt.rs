@@ -104,7 +104,7 @@ fn main() {
             .map(|file| serde_json::from_reader(&file).unwrap())
             .unwrap_or(Vec::new());
 
-        let hyper = lstm::Hyperparameters::random(data.num_items(), &mut rng).num_threads(1);
+        let hyper = lstm::Hyperparameters::random(data.num_items(), &mut rng);
 
         println!("Running {:#?}", &hyper);
         let start = Instant::now();
