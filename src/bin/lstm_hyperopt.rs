@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use wheedle::data::{user_based_split, CompressedInteractions, Interaction, Interactions};
-use wheedle::evaluation::{mrr_score, mrr_score_train};
+use wheedle::evaluation::mrr_score;
 use wheedle::models::lstm;
 
 #[derive(Deserialize, Serialize)]
@@ -99,64 +99,34 @@ fn main() {
         data.len()
     );
 
-    // let mut timestamps: Vec<_> = data.data().iter().map(|x| x.timestamp()).collect();
-    // timestamps.sort();
-    // println!("{:#?}", &timestamps[..100]);
-
     for _ in 0..1000 {
         let mut results: Vec<Result> = File::open("lstm_results.json")
             .map(|file| serde_json::from_reader(&file).unwrap())
             .unwrap_or(Vec::new());
 
         let hyper = lstm::Hyperparameters::random(data.num_items(), &mut rng).num_threads(1);
-        let hyper = lstm::Hyperparameters::new(data.num_items(), 128)
-        // .learning_rate(0.1587585)
-            .learning_rate(0.1587585)
-        .l2_penalty(0.0004076614)
-              //.l2_penalty(0.000004076614)
-            //.num_threads(2)
-            .embedding_dim(16)
-            //.loss(lstm::Loss::BPR)
-            .loss(lstm::Loss::Hinge)
-            .optimizer(lstm::Optimizer::Adagrad)
-            // .optimizer(lstm::Optimizer::Adam)
-            .num_epochs(1);
 
-        let num_epochs = 300;
+        println!("Running {:#?}", &hyper);
+        let start = Instant::now();
+        let model = fit(&train, hyper.clone());
+        let result = Result {
+            train_mrr: mrr_score(&model, &train).unwrap(),
+            test_mrr: mrr_score(&model, &test).unwrap(),
+            elapsed: start.elapsed(),
+            hyperparameters: hyper,
+        };
 
-        let mut model = hyper.build();
+        println!("{:#?}", result);
 
-        for epoch in 0..num_epochs {
-            println!("Epoch: {}, loss {}", epoch, model.fit(&train).unwrap());
-            let mrr = mrr_score_train(&model, &test).unwrap();
-            println!("Test MRR ---------------------------------- {}", mrr);
-            let mrr = mrr_score_train(&model, &train).unwrap();
-            println!("Train MRR {}", mrr);
+        if !result.test_mrr.is_nan() {
+            results.push(result);
+            results.sort_by(|a, b| a.test_mrr.partial_cmp(&b.test_mrr).unwrap());
         }
 
-        // std::process::exit(0);
+        println!("Best result: {:#?}", results.last());
 
-        // println!("Running {:#?}", &hyper);
-        // let start = Instant::now();
-        // let model = fit(&train, hyper.clone());
-        // let result = Result {
-        //     train_mrr: mrr_score_train(&model, &train).unwrap(),
-        //     test_mrr: mrr_score_train(&model, &test).unwrap(),
-        //     elapsed: start.elapsed(),
-        //     hyperparameters: hyper,
-        // };
-
-        // println!("{:#?}", result);
-
-        // if !result.test_mrr.is_nan() {
-        //     results.push(result);
-        //     results.sort_by(|a, b| a.test_mrr.partial_cmp(&b.test_mrr).unwrap());
-        // }
-
-        // println!("Best result: {:#?}", results.last());
-
-        // File::create("lstm_results.json")
-        //     .map(|file| serde_json::to_writer_pretty(&file, &results).unwrap())
-        //     .unwrap();
+        File::create("lstm_results.json")
+            .map(|file| serde_json::to_writer_pretty(&file, &results).unwrap())
+            .unwrap();
     }
 }

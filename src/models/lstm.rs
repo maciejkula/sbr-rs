@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rand;
-use rand::distributions::{IndependentSample, Normal, Range, Sample, Uniform};
+use rand::distributions::{Distribution, Normal, Range, Uniform};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
 use rayon::prelude::*;
@@ -19,7 +19,7 @@ use data::CompressedInteractions;
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     let normal = Normal::new(0.0, 1.0 / cols as f64);
-    Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
+    Arr::zeros((rows, cols)).map(|_| normal.sample(rng) as f32)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,6 +34,12 @@ pub enum Optimizer {
     Adam,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Parallelism {
+    Asynchronous,
+    Synchronous,
+}
+
 #[derive(Builder, Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     num_items: usize,
@@ -43,6 +49,7 @@ pub struct Hyperparameters {
     l2_penalty: f32,
     loss: Loss,
     optimizer: Optimizer,
+    parallelism: Parallelism,
     rng: XorShiftRng,
     num_threads: usize,
     num_epochs: usize,
@@ -58,6 +65,7 @@ impl Hyperparameters {
             l2_penalty: 0.0,
             loss: Loss::BPR,
             optimizer: Optimizer::Adam,
+            parallelism: Parallelism::Asynchronous,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
@@ -94,6 +102,11 @@ impl Hyperparameters {
         self
     }
 
+    pub fn parallelism(mut self, parallelism: Parallelism) -> Self {
+        self.parallelism = parallelism;
+        self
+    }
+
     pub fn rng(mut self, rng: XorShiftRng) -> Self {
         self.rng = rng;
         self
@@ -111,15 +124,20 @@ impl Hyperparameters {
             item_embedding_dim: 2_usize.pow(Uniform::new(4, 8).sample(rng)),
             learning_rate: (10.0_f32).powf(Uniform::new(-3.0, 0.5).sample(rng)),
             l2_penalty: (10.0_f32).powf(Uniform::new(-7.0, -3.0).sample(rng)),
-            loss: if rng.gen::<f32>() < 0.5 {
+            loss: if Uniform::new(0.0, 1.0).sample(rng) < 0.5 {
                 Loss::BPR
             } else {
                 Loss::Hinge
             },
-            optimizer: if rng.gen::<f32>() < 0.5 {
+            optimizer: if Uniform::new(0.0, 1.0).sample(rng) < 0.5 {
                 Optimizer::Adam
             } else {
                 Optimizer::Adagrad
+            },
+            parallelism: if Uniform::new(0.0, 1.0).sample(rng) < 0.5 {
+                Parallelism::Asynchronous
+            } else {
+                Parallelism::Synchronous
             },
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
@@ -210,7 +228,7 @@ impl Parameters {
             .map(|negative| item_biases.index(negative))
             .collect();
 
-        let mut layer = self.lstm.build();
+        let layer = self.lstm.build();
         let hidden = layer.forward(&input_embeddings);
 
         let positive_predictions: Vec<_> =
@@ -248,7 +266,6 @@ impl Parameters {
             outputs: outputs,
             negatives: negatives,
             hidden_states: hidden,
-            lstm: layer,
             losses: losses,
             summed_losses: summed_losses,
         }
@@ -259,7 +276,6 @@ struct Model {
     inputs: Vec<Variable<wyrm::IndexInputNode>>,
     outputs: Vec<Variable<wyrm::IndexInputNode>>,
     negatives: Vec<Variable<wyrm::IndexInputNode>>,
-    lstm: nn::lstm::Layer,
     hidden_states: Vec<Variable<BoxedNode>>,
     losses: Vec<Variable<BoxedNode>>,
     summed_losses: Vec<Variable<BoxedNode>>,
@@ -272,6 +288,37 @@ pub struct ImplicitLSTMModel {
 }
 
 impl ImplicitLSTMModel {
+    fn optimizer(
+        &self,
+        parameters: Vec<wyrm::Variable<wyrm::ParameterNode>>,
+        barrier: &wyrm::SynchronizationBarrier,
+    ) -> Box<Optim> {
+        match self.hyper.optimizer {
+            Optimizer::Adagrad => Box::new({
+                let opt = wyrm::Adagrad::new(self.hyper.learning_rate, parameters)
+                    .l2_penalty(self.hyper.l2_penalty)
+                    .clamp(-1.0, 1.0);
+
+                if self.hyper.parallelism == Parallelism::Synchronous {
+                    opt.synchronized(barrier)
+                } else {
+                    opt
+                }
+            }) as Box<Optim>,
+            Optimizer::Adam => Box::new({
+                let opt = optim::Adam::new(parameters)
+                    .learning_rate(self.hyper.learning_rate)
+                    .l2_penalty(self.hyper.l2_penalty)
+                    .clamp(-1.0, 1.0);
+
+                if self.hyper.parallelism == Parallelism::Synchronous {
+                    opt.synchronized(barrier)
+                } else {
+                    opt
+                }
+            }) as Box<Optim>,
+        }
+    }
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, &'static str> {
         let negative_item_range = Range::new(0, interactions.num_items());
 
@@ -298,22 +345,8 @@ impl ImplicitLSTMModel {
             .map(|(partition, ref mut thread_rng)| {
                 let mut model = self.params
                     .build(self.hyper.max_sequence_length, &self.hyper.loss);
-                let optimizer = match self.hyper.optimizer {
-                    Optimizer::Adagrad => Box::new(
-                        wyrm::Adagrad::new(
-                            self.hyper.learning_rate,
-                            model.losses.last().unwrap().parameters(),
-                        ).l2_penalty(self.hyper.l2_penalty)
-                            //.synchronized(&sync_barrier)
-                            .clamp(-1.0, 1.0),
-                    ) as Box<Optim>,
-                    Optimizer::Adam => Box::new(
-                        optim::Adam::new(model.losses.last().unwrap().parameters())
-                            .learning_rate(self.hyper.learning_rate)
-                            .l2_penalty(self.hyper.l2_penalty)
-                            .clamp(-1.0, 1.0), //.synchronized(&sync_barrier)
-                    ) as Box<Optim>,
-                };
+                let optimizer =
+                    self.optimizer(model.losses.last().unwrap().parameters(), &sync_barrier);
 
                 let mut loss_value = 0.0;
                 let mut examples = 0;
@@ -322,10 +355,6 @@ impl ImplicitLSTMModel {
                     thread_rng.shuffle(partition);
 
                     for &item_ids in partition.iter() {
-                        if item_ids.len() < 2 {
-                            continue;
-                        }
-
                         for (&input_idx, &output_idx, input, output, negative) in izip!(
                             item_ids,
                             item_ids.iter().skip(1),
@@ -333,7 +362,7 @@ impl ImplicitLSTMModel {
                             &mut model.outputs,
                             &mut model.negatives
                         ) {
-                            let negative_idx = negative_item_range.ind_sample(thread_rng);
+                            let negative_idx = negative_item_range.sample(thread_rng);
 
                             input.set_value(input_idx);
                             output.set_value(output_idx);
@@ -472,9 +501,9 @@ mod tests {
         let loss = model.fit(&train_mat).unwrap();
         let train_mrr = mrr_score(&model, &train_mat).unwrap();
 
-        println!("Train MRR {}", train_mrr);
+        println!("Train MRR {} at loss {}", train_mrr, loss);
 
-        assert!(train_mrr > 0.047)
+        assert!(train_mrr > 0.0718)
     }
 
     const TOLERANCE: f32 = 0.02;

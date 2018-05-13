@@ -1,10 +1,8 @@
 use std;
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::hash::Hasher;
 
-use rand;
-use rand::distributions::{IndependentSample, Range};
+use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
 
 use siphasher::sip::SipHasher;
@@ -63,8 +61,8 @@ pub fn user_based_split<R: Rng>(
     let denominator = 100_000;
     let train_cutoff = (test_fraction * denominator as f32) as u64;
 
-    let range = Range::new(0, std::u64::MAX);
-    let (key_0, key_1) = (range.ind_sample(rng), range.ind_sample(rng));
+    let range = Uniform::new(0, std::u64::MAX);
+    let (key_0, key_1) = (range.sample(rng), range.sample(rng));
 
     let is_train = |x: &Interaction| {
         let mut hasher = SipHasher::new_with_keys(key_0, key_1);
@@ -73,18 +71,18 @@ pub fn user_based_split<R: Rng>(
         hasher.finish() % denominator > train_cutoff
     };
 
-    let mut user_ids: Vec<_> = interactions.data().iter().map(|x| x.user_id()).collect();
-    user_ids.sort();
-    user_ids.dedup();
+    // let mut user_ids: Vec<_> = interactions.data().iter().map(|x| x.user_id()).collect();
+    // user_ids.sort();
+    // user_ids.dedup();
 
-    let mut test_user_ids = rand::seq::sample_slice(
-        rng,
-        &user_ids,
-        (test_fraction * user_ids.len() as f32) as usize,
-    );
-    let test_user_ids: HashSet<_> = test_user_ids.drain(..).collect();
+    // let mut test_user_ids = rand::seq::sample_slice(
+    //     rng,
+    //     &user_ids,
+    //     (test_fraction * user_ids.len() as f32) as usize,
+    // );
+    // let test_user_ids: HashSet<_> = test_user_ids.drain(..).collect();
 
-    let is_train = |x: &Interaction| test_user_ids.contains(&x.user_id());
+    // let is_train = |x: &Interaction| test_user_ids.contains(&x.user_id());
 
     interactions.split_by(is_train)
 }
@@ -508,8 +506,7 @@ mod tests {
     use std::collections::HashSet;
 
     use rand;
-    use rand::distributions::{IndependentSample, Range};
-    use rand::Rng;
+    use rand::distributions::{Distribution, Uniform};
 
     use super::*;
 
@@ -519,17 +516,17 @@ mod tests {
         let num_items = 20;
         let num_interactions = 100;
 
-        let user_range = Range::new(0, num_users);
-        let item_range = Range::new(0, num_items);
-        let timestamp_range = Range::new(0, 50);
+        let user_range = Uniform::new(0, num_users);
+        let item_range = Uniform::new(0, num_items);
+        let timestamp_range = Uniform::new(0, 50);
 
         let mut rng = rand::thread_rng();
 
         let interactions: Vec<_> = (0..num_interactions)
             .map(|_| Interaction {
-                user_id: user_range.ind_sample(&mut rng),
-                item_id: item_range.ind_sample(&mut rng),
-                timestamp: timestamp_range.ind_sample(&mut rng),
+                user_id: user_range.sample(&mut rng),
+                item_id: item_range.sample(&mut rng),
+                timestamp: timestamp_range.sample(&mut rng),
             })
             .collect();
 
