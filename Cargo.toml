@@ -18,11 +18,18 @@ openblas-src = { version = "0.5.6", default-features = false, features = ["cblas
 derive_builder = "0.5.1"
 siphasher = "0.2.2"
 
-wyrm = { path = "../wyrm" }
+wyrm = { path = "../wyrm", features = ["fast-math"]}
+
+[dev-dependencies]
+criterion = "0.2.3"
 
 [profile.release]
 lto = false
 
+[[bench]]
+name = "benchmark"
+harness = false
+
 [profile.bench]
-lto = true
+lto = false
 debug = true

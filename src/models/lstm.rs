@@ -140,7 +140,7 @@ impl Hyperparameters {
                 Parallelism::Synchronous
             },
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
-            num_threads: rayon::current_num_threads(),
+            num_threads: Uniform::new(1, rayon::current_num_threads()).sample(rng),
             num_epochs: 2_usize.pow(Uniform::new(3, 7).sample(rng)),
         }
     }
@@ -371,15 +371,12 @@ impl ImplicitLSTMModel {
 
                         // Get the loss at the end of the sequence.
                         let loss_idx = item_ids.len().saturating_sub(2);
-
                         let loss = &mut model.summed_losses[loss_idx];
 
                         loss_value += loss.value().scalar_sum();
                         examples += loss_idx + 1;
 
                         loss.forward();
-                        // loss.clip(-1.0, 1.0);
-                        // loss.backward(1.0 / (loss_idx + 1) as f32);
                         loss.backward(1.0);
 
                         optimizer.step();
