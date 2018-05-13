@@ -94,6 +94,11 @@ impl Hyperparameters {
         self
     }
 
+    pub fn rng(mut self, rng: XorShiftRng) -> Self {
+        self.rng = rng;
+        self
+    }
+
     pub fn optimizer(mut self, optimizer: Optimizer) -> Self {
         self.optimizer = optimizer;
         self
@@ -134,7 +139,11 @@ impl Hyperparameters {
         Parameters {
             item_embedding: item_embeddings,
             item_biases: item_biases,
-            lstm: nn::lstm::Parameters::new(self.item_embedding_dim, self.item_embedding_dim),
+            lstm: nn::lstm::Parameters::new(
+                self.item_embedding_dim,
+                self.item_embedding_dim,
+                &mut self.rng,
+            ),
         }
     }
 
@@ -274,16 +283,19 @@ impl ImplicitLSTMModel {
                     .filter(|item_ids| item_ids.len() > 2)
             })
             .collect();
-        rand::thread_rng().shuffle(&mut subsequences);
+        self.hyper.rng.shuffle(&mut subsequences);
 
         let num_chunks = subsequences.len() / self.hyper.num_threads;
-        let mut partitions: Vec<_> = subsequences.chunks_mut(num_chunks).collect();
+        let mut partitions: Vec<_> = subsequences
+            .chunks_mut(num_chunks)
+            .map(|chunk| (chunk, XorShiftRng::from_seed(self.hyper.rng.gen())))
+            .collect();
 
         let sync_barrier = wyrm::SynchronizationBarrier::new();
 
         let loss = partitions
             .par_iter_mut()
-            .map(|mut partition| {
+            .map(|(partition, ref mut thread_rng)| {
                 let mut model = self.params
                     .build(self.hyper.max_sequence_length, &self.hyper.loss);
                 let optimizer = match self.hyper.optimizer {
@@ -307,7 +319,7 @@ impl ImplicitLSTMModel {
                 let mut examples = 0;
 
                 for _ in 0..self.hyper.num_epochs {
-                    rand::thread_rng().shuffle(partition);
+                    thread_rng.shuffle(partition);
 
                     for &item_ids in partition.iter() {
                         if item_ids.len() < 2 {
@@ -321,8 +333,7 @@ impl ImplicitLSTMModel {
                             &mut model.outputs,
                             &mut model.negatives
                         ) {
-                            let negative_idx =
-                                negative_item_range.ind_sample(&mut rand::thread_rng());
+                            let negative_idx = negative_item_range.ind_sample(thread_rng);
 
                             input.set_value(input_idx);
                             output.set_value(output_idx);
@@ -442,34 +453,28 @@ mod tests {
 
         let mut rng = rand::XorShiftRng::from_seed([42; 16]);
 
-        let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
+        let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
+        let train_mat = train.to_compressed();
 
         println!("Train: {}, test: {}", train.len(), test.len());
 
-        let mut model = Hyperparameters::new(train.num_items(), 50)
-            .embedding_dim(64)
-            .learning_rate(0.5)
-            .num_epochs(1)
+        let mut model = Hyperparameters::new(data.num_items(), 128)
+            .embedding_dim(32)
+            .learning_rate(0.16)
+            .l2_penalty(0.0004)
+            .loss(Loss::Hinge)
+            .optimizer(Optimizer::Adagrad)
+            .num_epochs(10)
+            .num_threads(1)
+            .rng(rng)
             .build();
 
-        let num_epochs = 300;
-        let all_mat = data.to_compressed();
-        let train_mat = train.to_compressed();
-        let test_mat = test.to_compressed();
+        let loss = model.fit(&train_mat).unwrap();
+        let train_mrr = mrr_score(&model, &train_mat).unwrap();
 
-        for epoch in 0..num_epochs {
-            println!("Epoch: {}, loss {}", epoch, model.fit(&train_mat).unwrap());
-            let mrr = mrr_score(&model, &test_mat).unwrap();
-            println!("Test MRR {}", mrr);
-            let mrr = mrr_score(&model, &train_mat).unwrap();
-            println!("Train MRR {}", mrr);
-        }
-        let mrr = mrr_score(&model, &train.to_compressed()).unwrap();
-        println!("MRR {}", mrr);
-        let mrr = mrr_score(&model, &test.to_compressed()).unwrap();
-        println!("MRR {}", mrr);
+        println!("Train MRR {}", train_mrr);
 
-        //assert!(mrr > 0.065);
+        assert!(train_mrr > 0.047)
     }
 
     const TOLERANCE: f32 = 0.02;
@@ -482,7 +487,7 @@ mod tests {
         let model = Hyperparameters::new(num_items, seq_len)
             .embedding_dim(4)
             .build();
-        let mut model = model.params.build(seq_len);
+        let mut model = model.params.build(seq_len, &Loss::BPR);
 
         let mut rng = rand::thread_rng();
 

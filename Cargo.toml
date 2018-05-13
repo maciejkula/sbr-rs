@@ -22,7 +22,6 @@ wyrm = { path = "../wyrm" }
 
 [profile.release]
 lto = false
-debug = true
 
 [profile.bench]
 lto = true

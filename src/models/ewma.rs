@@ -423,74 +423,74 @@ mod tests {
         Interactions::from(interactions)
     }
 
-    #[test]
-    fn fold_in() {
-        let mut data = load_movielens("data_1M.csv");
+    // #[test]
+    // fn fold_in() {
+    //     let mut data = load_movielens("data_1M.csv");
 
-        let mut rng = rand::XorShiftRng::from_seed([42; 16]);
+    //     let mut rng = rand::XorShiftRng::from_seed([42; 16]);
 
-        let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
+    //     let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
 
-        println!("Train: {}, test: {}", train.len(), test.len());
+    //     println!("Train: {}, test: {}", train.len(), test.len());
 
-        let mut model = Hyperparameters::new(train.num_items(), 32)
-            .embedding_dim(8)
-            .l2_penalty(1e-6)
-            .learning_rate(0.01)
-            .build();
+    //     let mut model = Hyperparameters::new(train.num_items(), 32)
+    //         .embedding_dim(8)
+    //         .l2_penalty(1e-6)
+    //         .learning_rate(0.01)
+    //         .build();
 
-        let num_epochs = 100;
-        let all_mat = data.to_compressed();
-        let train_mat = train.to_compressed();
-        let test_mat = test.to_compressed();
+    //     let num_epochs = 100;
+    //     let all_mat = data.to_compressed();
+    //     let train_mat = train.to_compressed();
+    //     let test_mat = test.to_compressed();
 
-        let train_items = train_mat
-            .iter_users()
-            .flat_map(|x| x.item_ids.last())
-            .collect::<std::collections::HashSet<_>>();
-        let test_items = test_mat
-            .iter_users()
-            .flat_map(|x| x.item_ids.last())
-            .collect::<std::collections::HashSet<_>>();
+    //     let train_items = train_mat
+    //         .iter_users()
+    //         .flat_map(|x| x.item_ids.last())
+    //         .collect::<std::collections::HashSet<_>>();
+    //     let test_items = test_mat
+    //         .iter_users()
+    //         .flat_map(|x| x.item_ids.last())
+    //         .collect::<std::collections::HashSet<_>>();
 
-        println!(
-            "Train size {}, test size {}, intersection size: {:#?}",
-            train_items.len(),
-            test_items.len(),
-            train_items.intersection(&test_items).count(),
-        );
+    //     println!(
+    //         "Train size {}, test size {}, intersection size: {:#?}",
+    //         train_items.len(),
+    //         test_items.len(),
+    //         train_items.intersection(&test_items).count(),
+    //     );
 
-        let train_items = train_mat
-            .iter_users()
-            .flat_map(|x| x.item_ids)
-            .collect::<std::collections::HashSet<_>>();
-        let test_items = test_mat
-            .iter_users()
-            .flat_map(|x| x.item_ids)
-            .collect::<std::collections::HashSet<_>>();
+    //     let train_items = train_mat
+    //         .iter_users()
+    //         .flat_map(|x| x.item_ids)
+    //         .collect::<std::collections::HashSet<_>>();
+    //     let test_items = test_mat
+    //         .iter_users()
+    //         .flat_map(|x| x.item_ids)
+    //         .collect::<std::collections::HashSet<_>>();
 
-        println!(
-            "ALL ITEMS: Train size {}, test size {}, intersection size: {:#?}",
-            train_items.len(),
-            test_items.len(),
-            train_items.intersection(&test_items).count(),
-        );
+    //     println!(
+    //         "ALL ITEMS: Train size {}, test size {}, intersection size: {:#?}",
+    //         train_items.len(),
+    //         test_items.len(),
+    //         train_items.intersection(&test_items).count(),
+    //     );
 
-        for _ in 0..num_epochs {
-            println!("Loss: {}", model.fit(&train_mat).unwrap());
-            //println!("Loss: {}", model.fit(&all_mat).unwrap());
-            let mrr = mrr_score(&model, &test_mat).unwrap();
-            println!("Test MRR {}", mrr);
-            let mrr = mrr_score(&model, &train_mat).unwrap();
-            println!("Train MRR {}", mrr);
-        }
-        let mrr = mrr_score(&model, &train.to_compressed()).unwrap();
-        println!("MRR {}", mrr);
-        let mrr = mrr_score(&model, &test.to_compressed()).unwrap();
-        println!("MRR {}", mrr);
+    //     for _ in 0..num_epochs {
+    //         println!("Loss: {}", model.fit(&train_mat).unwrap());
+    //         //println!("Loss: {}", model.fit(&all_mat).unwrap());
+    //         let mrr = mrr_score(&model, &test_mat).unwrap();
+    //         println!("Test MRR {}", mrr);
+    //         let mrr = mrr_score(&model, &train_mat).unwrap();
+    //         println!("Train MRR {}", mrr);
+    //     }
+    //     let mrr = mrr_score(&model, &train.to_compressed()).unwrap();
+    //     println!("MRR {}", mrr);
+    //     let mrr = mrr_score(&model, &test.to_compressed()).unwrap();
+    //     println!("MRR {}", mrr);
 
-        //assert!(mrr > 0.065);
-    }
+    //     //assert!(mrr > 0.065);
+    // }
 
     //     #[bench]
     //     fn bench_movielens(b: &mut Bencher) {
