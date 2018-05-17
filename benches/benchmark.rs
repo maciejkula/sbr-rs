@@ -32,7 +32,7 @@ fn bench_lstm(c: &mut Criterion) {
             .l2_penalty(0.0004)
             .loss(Loss::Hinge)
             .optimizer(Optimizer::Adagrad)
-            .num_epochs(1)
+            .num_epochs(3)
             .num_threads(1)
             .build();
 
@@ -44,7 +44,7 @@ fn bench_lstm(c: &mut Criterion) {
 
 criterion_group!{
     name = benches;
-    config = Criterion::default().sample_size(20);
+    config = Criterion::default().sample_size(10);
     targets = bench_lstm
 }
 criterion_main!(benches);

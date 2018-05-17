@@ -140,7 +140,7 @@ impl Hyperparameters {
                 Parallelism::Synchronous
             },
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
-            num_threads: Uniform::new(1, rayon::current_num_threads()).sample(rng),
+            num_threads: Uniform::new(1, rayon::current_num_threads() + 1).sample(rng),
             num_epochs: 2_usize.pow(Uniform::new(3, 7).sample(rng)),
         }
     }
@@ -456,6 +456,7 @@ impl OnlineRankingModel for ImplicitLSTMModel {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
 
     use csv;
     use wyrm::{assert_close, finite_difference};
@@ -493,10 +494,15 @@ mod tests {
             .rng(rng)
             .build();
 
+        let start = Instant::now();
         let loss = model.fit(&train_mat).unwrap();
+        let elapsed = start.elapsed();
         let train_mrr = mrr_score(&model, &train_mat).unwrap();
 
-        println!("Train MRR {} at loss {}", train_mrr, loss);
+        println!(
+            "Train MRR {} at loss {} (in {:?})",
+            train_mrr, loss, elapsed
+        );
 
         assert!(train_mrr > 0.0718)
     }

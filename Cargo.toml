@@ -24,7 +24,7 @@ wyrm = { path = "../wyrm", features = ["fast-math"]}
 criterion = "0.2.3"
 
 [profile.release]
-lto = false
+lto = true
 
 [[bench]]
 name = "benchmark"
