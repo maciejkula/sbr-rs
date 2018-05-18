@@ -341,7 +341,8 @@ impl ImplicitLSTMModel {
         let loss = partitions
             .par_iter_mut()
             .map(|(partition, ref mut thread_rng)| {
-                let mut model = self.params
+                let mut model = self
+                    .params
                     .build(self.hyper.max_sequence_length, &self.hyper.loss);
                 let optimizer =
                     self.optimizer(model.losses.last().unwrap().parameters(), &sync_barrier);
@@ -401,7 +402,8 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         &self,
         item_ids: &[ItemId],
     ) -> Result<Self::UserRepresentation, &'static str> {
-        let model = self.params
+        let model = self
+            .params
             .build(self.hyper.max_sequence_length, &self.hyper.loss);
 
         let item_ids = &item_ids[item_ids
@@ -480,6 +482,7 @@ mod tests {
 
         let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
         let train_mat = train.to_compressed();
+        let test_mat = test.to_compressed();
 
         println!("Train: {}, test: {}", train.len(), test.len());
 
@@ -498,13 +501,14 @@ mod tests {
         let loss = model.fit(&train_mat).unwrap();
         let elapsed = start.elapsed();
         let train_mrr = mrr_score(&model, &train_mat).unwrap();
+        let test_mrr = mrr_score(&model, &test_mat).unwrap();
 
         println!(
-            "Train MRR {} at loss {} (in {:?})",
-            train_mrr, loss, elapsed
+            "Train MRR {} at loss {} and test MRR {} (in {:?})",
+            train_mrr, loss, test_mrr, elapsed
         );
 
-        assert!(train_mrr > 0.0718)
+        assert!(test_mrr > 0.102)
     }
 
     const TOLERANCE: f32 = 0.02;
