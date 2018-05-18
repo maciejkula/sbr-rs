@@ -13,8 +13,7 @@ rand = { version = "0.5.0-pre.1", features = ["serde1"] }
 itertools = "0.7.3"
 rayon = "0.9.0"
 ndarray = { version = "0.11.0", features = ["blas", "serde-1"] }
-blas-src = { version = "0.1.2", default-features = false, features = ["openblas"] }
-openblas-src = { version = "0.5.6", default-features = false, features = ["cblas", "static"] }
+blas-src = { version = "0.1.2", default-features = false, features = ["intel-mkl"] }
 derive_builder = "0.5.1"
 siphasher = "0.2.2"
 
@@ -33,3 +32,7 @@ harness = false
 [profile.bench]
 lto = true
 debug = true
+
+[[example]]
+name = "lstm_hyperopt"
+crate-type = ["bin"]
