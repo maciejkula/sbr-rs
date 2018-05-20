@@ -10,7 +10,6 @@ use ndarray::Axis;
 
 use wyrm;
 use wyrm::nn;
-use wyrm::optim;
 use wyrm::optim::Optimizer as Optim;
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
@@ -291,11 +290,12 @@ impl ImplicitLSTMModel {
     fn optimizer(
         &self,
         parameters: Vec<wyrm::Variable<wyrm::ParameterNode>>,
-        barrier: &wyrm::SynchronizationBarrier,
+        barrier: &wyrm::optim::SynchronizationBarrier,
     ) -> Box<Optim> {
         match self.hyper.optimizer {
             Optimizer::Adagrad => Box::new({
-                let opt = wyrm::Adagrad::new(self.hyper.learning_rate, parameters)
+                let opt = wyrm::optim::Adagrad::new(parameters)
+                    .learning_rate(self.hyper.learning_rate)
                     .l2_penalty(self.hyper.l2_penalty);
 
                 if self.hyper.parallelism == Parallelism::Synchronous {
@@ -305,7 +305,7 @@ impl ImplicitLSTMModel {
                 }
             }) as Box<Optim>,
             Optimizer::Adam => Box::new({
-                let opt = optim::Adam::new(parameters)
+                let opt = wyrm::optim::Adam::new(parameters)
                     .learning_rate(self.hyper.learning_rate)
                     .l2_penalty(self.hyper.l2_penalty);
 
@@ -336,7 +336,7 @@ impl ImplicitLSTMModel {
             .map(|chunk| (chunk, XorShiftRng::from_seed(self.hyper.rng.gen())))
             .collect();
 
-        let sync_barrier = wyrm::SynchronizationBarrier::new();
+        let sync_barrier = wyrm::optim::SynchronizationBarrier::new();
 
         let loss = partitions
             .par_iter_mut()
