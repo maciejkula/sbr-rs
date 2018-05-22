@@ -17,7 +17,7 @@ blas-src = { version = "0.1.2", default-features = false, features = ["intel-mkl
 siphasher = "0.2.2"
 failure = "0.1.1"
 
-wyrm = { path = "../wyrm", features = ["fast-math"]}
+wyrm = { version = "0.8.0", features = ["fast-math"]}
 
 [dev-dependencies]
 criterion = "0.2.3"
