@@ -7,4 +7,6 @@ before_install:
   - sudo apt-get install -y gfortran
 
 script:
+  - cargo install cargo-tree
+  - cargo tree
   - cargo test --verbose --all --release
