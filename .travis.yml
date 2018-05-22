@@ -7,6 +7,5 @@ before_install:
   - sudo apt-get install -y gfortran
 
 script:
-  - cargo install cargo-tree
-  - cargo tree
-  - cargo test --verbose --all --release
+  - RUSTFLAGS="-C target-cpu=native" cargo test --release
+  - cat Cargo.lock
