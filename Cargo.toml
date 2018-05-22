@@ -2,6 +2,13 @@
 name = "sbr"
 version = "0.1.0"
 authors = ["Maciej Kula"]
+license = "MIT"
+description = "Recommender models."
+repository = "https://github.com/maciejkula/sbr-rs"
+readme = "readme.md"
+
+[badges]
+travis-ci = { repository = "maciejkula/sbr-rs", branch = "master" }
 
 [dependencies]
 serde = { version = "1.0.0", features = ["rc"] }
