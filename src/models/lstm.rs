@@ -519,40 +519,4 @@ mod tests {
 
         assert!(test_mrr > 0.102)
     }
-
-    const TOLERANCE: f32 = 0.02;
-
-    #[test]
-    fn model_finite_difference() {
-        let seq_len = 10;
-        let num_items = 5;
-        let num_trials = 10;
-        let model = Hyperparameters::new(num_items, seq_len)
-            .embedding_dim(4)
-            .build();
-        let mut model = model.params.build(seq_len, &Loss::BPR);
-
-        let mut rng = rand::thread_rng();
-
-        for _ in 0..num_trials {
-            let subseq_len = Uniform::new(0, seq_len).sample(&mut rng);
-            let mut loss = model.summed_losses[subseq_len].clone();
-
-            for (input, positive, negative) in izip!(
-                model.inputs.iter_mut().take(subseq_len),
-                model.outputs.iter_mut().take(subseq_len),
-                model.negatives.iter_mut().take(subseq_len)
-            ) {
-                input.set_value(Uniform::new(0, num_items).sample(&mut rng));
-                positive.set_value(Uniform::new(0, num_items).sample(&mut rng));
-                negative.set_value(Uniform::new(0, num_items).sample(&mut rng));
-            }
-
-            for mut param in loss.parameters() {
-                let (difference, gradient) = finite_difference(&mut param, &mut loss);
-                assert_close(&difference, &gradient, TOLERANCE);
-            }
-        }
-    }
-
 }
