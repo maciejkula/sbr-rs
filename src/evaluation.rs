@@ -2,16 +2,20 @@ use std;
 
 use rayon::prelude::*;
 
-use super::OnlineRankingModel;
 use data::CompressedInteractions;
+use {OnlineRankingModel, PredictionError};
 
+/// Compute the MRR (mean reciprocal rank) of predictions for the last
+/// item in `test` sequences, treating all but the last one item as inputs
+/// in computing the user representation.
 pub fn mrr_score<T: OnlineRankingModel + Sync>(
     model: &T,
     test: &CompressedInteractions,
-) -> Result<f32, &'static str> {
+) -> Result<f32, PredictionError> {
     let item_ids: Vec<usize> = (0..test.num_items()).collect();
 
-    let mrrs = test.iter_users()
+    let mrrs = test
+        .iter_users()
         .filter(|user| user.item_ids.len() >= 2)
         .collect::<Vec<_>>()
         .par_iter()
@@ -20,7 +24,7 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
             let test_item = *test_user.item_ids.last().unwrap();
 
             let user_embedding = model.user_representation(train_items).unwrap();
-            let mut predictions = model.predict(&user_embedding, &item_ids).unwrap();
+            let mut predictions = model.predict(&user_embedding, &item_ids)?;
 
             for &train_item_id in train_items {
                 predictions[train_item_id] = std::f32::MIN;
@@ -30,10 +34,6 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
             let mut rank = 0;
 
             for &prediction in &predictions {
-                if !prediction.is_finite() {
-                    return Err("Prediction is not finite.");
-                }
-
                 if prediction >= test_score {
                     rank += 1;
                 }
@@ -41,7 +41,7 @@ pub fn mrr_score<T: OnlineRankingModel + Sync>(
 
             Ok(1.0 / rank as f32)
         })
-        .collect::<Result<Vec<f32>, &'static str>>()?;
+        .collect::<Result<Vec<f32>, PredictionError>>()?;
 
     Ok(mrrs.iter().sum::<f32>() / mrrs.len() as f32)
 }

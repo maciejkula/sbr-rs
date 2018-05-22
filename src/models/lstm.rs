@@ -13,8 +13,8 @@ use wyrm::nn;
 use wyrm::optim::Optimizer as Optim;
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
-use super::super::{ItemId, OnlineRankingModel};
 use data::CompressedInteractions;
+use {ItemId, OnlineRankingModel, PredictionError};
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     let normal = Normal::new(0.0, 1.0 / cols as f64);
@@ -39,7 +39,7 @@ pub enum Parallelism {
     Synchronous,
 }
 
-#[derive(Builder, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     num_items: usize,
     max_sequence_length: usize,
@@ -108,6 +108,11 @@ impl Hyperparameters {
 
     pub fn rng(mut self, rng: XorShiftRng) -> Self {
         self.rng = rng;
+        self
+    }
+
+    pub fn from_seed(mut self, seed: [u8; 16]) -> Self {
+        self.rng = XorShiftRng::from_seed(seed);
         self
     }
 
@@ -401,7 +406,7 @@ impl OnlineRankingModel for ImplicitLSTMModel {
     fn user_representation(
         &self,
         item_ids: &[ItemId],
-    ) -> Result<Self::UserRepresentation, &'static str> {
+    ) -> Result<Self::UserRepresentation, PredictionError> {
         let model = self
             .params
             .build(self.hyper.max_sequence_length, &self.hyper.loss);
@@ -434,25 +439,29 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         &self,
         user: &Self::UserRepresentation,
         item_ids: &[ItemId],
-    ) -> Result<Vec<f32>, &'static str> {
+    ) -> Result<Vec<f32>, PredictionError> {
         let item_embeddings = &self.params.item_embedding;
         let item_biases = &self.params.item_biases;
 
         let embeddings = item_embeddings.value();
         let biases = item_biases.value();
 
-        let predictions: Vec<f32> = item_ids
+        item_ids
             .iter()
             .map(|&item_idx| {
                 let embedding = embeddings.subview(Axis(0), item_idx);
                 let bias = biases[(item_idx, 0)];
                 let dot = wyrm::simd_dot(&user.user_embedding, embedding.as_slice().unwrap());
 
-                bias + dot
-            })
-            .collect();
+                let prediction = bias + dot;
 
-        Ok(predictions)
+                if prediction.is_finite() {
+                    Ok(prediction)
+                } else {
+                    Err(PredictionError::InvalidPredictionValue)
+                }
+            })
+            .collect()
     }
 }
 

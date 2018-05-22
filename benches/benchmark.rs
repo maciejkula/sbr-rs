@@ -3,15 +3,15 @@ extern crate criterion;
 
 extern crate csv;
 extern crate rand;
+extern crate sbr;
 extern crate serde;
 extern crate serde_json;
-extern crate wheedle;
 extern crate wyrm;
 
 use criterion::Criterion;
 
-use wheedle::data::{Interaction, Interactions};
-use wheedle::models::lstm::{Hyperparameters, Loss, Optimizer};
+use sbr::data::{Interaction, Interactions};
+use sbr::models::lstm::{Hyperparameters, Loss, Optimizer};
 
 fn load_movielens(path: &str, sample_size: usize) -> Interactions {
     let mut reader = csv::Reader::from_path(path).unwrap();

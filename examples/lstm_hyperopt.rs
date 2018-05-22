@@ -4,7 +4,7 @@
 
 extern crate csv;
 extern crate rand;
-extern crate wheedle;
+extern crate sbr;
 extern crate wyrm;
 #[macro_use]
 extern crate serde_derive;
@@ -18,9 +18,9 @@ use std::io::{BufReader, Read};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use wheedle::data::{user_based_split, CompressedInteractions, Interaction, Interactions};
-use wheedle::evaluation::mrr_score;
-use wheedle::models::lstm;
+use sbr::data::{user_based_split, CompressedInteractions, Interaction, Interactions};
+use sbr::evaluation::mrr_score;
+use sbr::models::lstm;
 
 #[derive(Deserialize, Serialize)]
 struct GoodbooksInteraction {

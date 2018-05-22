@@ -71,19 +71,6 @@ pub fn user_based_split<R: Rng>(
         hasher.finish() % denominator > train_cutoff
     };
 
-    // let mut user_ids: Vec<_> = interactions.data().iter().map(|x| x.user_id()).collect();
-    // user_ids.sort();
-    // user_ids.dedup();
-
-    // let mut test_user_ids = rand::seq::sample_slice(
-    //     rng,
-    //     &user_ids,
-    //     (test_fraction * user_ids.len() as f32) as usize,
-    // );
-    // let test_user_ids: HashSet<_> = test_user_ids.drain(..).collect();
-
-    // let is_train = |x: &Interaction| test_user_ids.contains(&x.user_id());
-
     interactions.split_by(is_train)
 }
 
@@ -100,6 +87,10 @@ impl Interactions {
             num_items: num_items,
             interactions: Vec::new(),
         }
+    }
+
+    pub fn push(&mut self, interaction: Interaction) {
+        self.interactions.push(interaction);
     }
 
     pub fn data(&self) -> &[Interaction] {
@@ -133,7 +124,8 @@ impl Interactions {
         let head = Interactions {
             num_users: self.num_users,
             num_items: self.num_items,
-            interactions: self.interactions
+            interactions: self
+                .interactions
                 .iter()
                 .filter(|x| func(x))
                 .cloned()
@@ -142,7 +134,8 @@ impl Interactions {
         let tail = Interactions {
             num_users: self.num_users,
             num_items: self.num_items,
-            interactions: self.interactions
+            interactions: self
+                .interactions
                 .iter()
                 .filter(|x| !func(x))
                 .cloned()
