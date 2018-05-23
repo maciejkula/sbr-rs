@@ -19,8 +19,7 @@ bincode = "0.9.2"
 rand = { version = "0.5.0", features = ["serde1"] }
 itertools = "0.7.3"
 rayon = "1.0.0"
-ndarray = { version = "0.11.0", features = ["blas", "serde-1"] }
-blas-src = { version = "0.1.2", default-features = false, features = ["intel-mkl"] }
+ndarray = { version = "0.11.0", features = ["serde-1"] }
 siphasher = "0.2.2"
 failure = "0.1.1"
 
@@ -28,6 +27,8 @@ wyrm = { version = "0.8.0", features = ["fast-math"]}
 
 [dev-dependencies]
 criterion = "0.2.3"
+ndarray = { version = "0.11.0", features = ["blas", "serde-1"] }
+blas-src = { version = "0.1.2", default-features = false, features = ["intel-mkl"] }
 
 [profile.release]
 lto = true
