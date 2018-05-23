@@ -346,8 +346,7 @@ impl ImplicitLSTMModel {
         let loss = partitions
             .par_iter_mut()
             .map(|(partition, ref mut thread_rng)| {
-                let mut model = self
-                    .params
+                let mut model = self.params
                     .build(self.hyper.max_sequence_length, &self.hyper.loss);
                 let optimizer =
                     self.optimizer(model.losses.last().unwrap().parameters(), &sync_barrier);
@@ -407,8 +406,7 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         &self,
         item_ids: &[ItemId],
     ) -> Result<Self::UserRepresentation, PredictionError> {
-        let model = self
-            .params
+        let model = self.params
             .build(self.hyper.max_sequence_length, &self.hyper.loss);
 
         let item_ids = &item_ids[item_ids
@@ -470,7 +468,6 @@ mod tests {
     use std::time::Instant;
 
     use csv;
-    use wyrm::{assert_close, finite_difference};
 
     use super::*;
     use data::{user_based_split, Interaction, Interactions};
@@ -512,11 +509,18 @@ mod tests {
         let train_mrr = mrr_score(&model, &train_mat).unwrap();
         let test_mrr = mrr_score(&model, &test_mat).unwrap();
 
+        // Results differ between different vector widths in MKL.
+        let expected_mrr = if ::std::env::var("MKL_CBWR") == Ok("AVX".to_owned()) {
+            0.091
+        } else {
+            0.102
+        };
+
         println!(
             "Train MRR {} at loss {} and test MRR {} (in {:?})",
             train_mrr, loss, test_mrr, elapsed
         );
 
-        assert!(test_mrr > 0.102)
+        assert!(test_mrr > expected_mrr)
     }
 }
