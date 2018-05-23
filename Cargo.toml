@@ -6,6 +6,7 @@ license = "MIT"
 description = "Recommender models."
 repository = "https://github.com/maciejkula/sbr-rs"
 readme = "readme.md"
+exclude = ["data.csv"]
 
 [badges]
 travis-ci = { repository = "maciejkula/sbr-rs", branch = "master" }
