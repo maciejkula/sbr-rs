@@ -1,3 +1,5 @@
+//! Module for LSTM-based models.
+
 use std::sync::Arc;
 
 use rand;
@@ -21,24 +23,34 @@ fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     Arr::zeros((rows, cols)).map(|_| normal.sample(rng) as f32)
 }
 
+/// The loss used for training the model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Loss {
+    /// Bayesian Personalised Ranking.
     BPR,
+    /// Pairwise hinge loss.
     Hinge,
 }
 
+/// Optimizer user to train the model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Optimizer {
+    /// Adagrad.
     Adagrad,
+    /// Adam.
     Adam,
 }
 
+/// Type of parallelism used to train the model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Parallelism {
+    /// Multiple threads operate in parallel without any locking.
     Asynchronous,
+    /// Multiple threads synchronise parameters between minibatches.
     Synchronous,
 }
 
+/// Hyperparameters for the [ImplicitLSTMModel].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     num_items: usize,
@@ -55,6 +67,7 @@ pub struct Hyperparameters {
 }
 
 impl Hyperparameters {
+    /// Build new hyperparameters.
     pub fn new(num_items: usize, max_sequence_length: usize) -> Self {
         Hyperparameters {
             num_items: num_items,
@@ -71,56 +84,67 @@ impl Hyperparameters {
         }
     }
 
+    /// Set the learning rate.
     pub fn learning_rate(mut self, learning_rate: f32) -> Self {
         self.learning_rate = learning_rate;
         self
     }
 
+    /// Set the l2 penalty.
     pub fn l2_penalty(mut self, l2_penalty: f32) -> Self {
         self.l2_penalty = l2_penalty;
         self
     }
 
+    /// Set the embedding dimensionality.
     pub fn embedding_dim(mut self, embedding_dim: usize) -> Self {
         self.item_embedding_dim = embedding_dim;
         self
     }
 
+    /// Set the number of epochs to run per each `fit` call.
     pub fn num_epochs(mut self, num_epochs: usize) -> Self {
         self.num_epochs = num_epochs;
         self
     }
 
+    /// Set the loss function.
     pub fn loss(mut self, loss: Loss) -> Self {
         self.loss = loss;
         self
     }
 
+    /// Set number of threads to be used.
     pub fn num_threads(mut self, num_threads: usize) -> Self {
         self.num_threads = num_threads;
         self
     }
 
+    /// Set the type of paralellism.
     pub fn parallelism(mut self, parallelism: Parallelism) -> Self {
         self.parallelism = parallelism;
         self
     }
 
+    /// Set the random number generator.
     pub fn rng(mut self, rng: XorShiftRng) -> Self {
         self.rng = rng;
         self
     }
 
+    /// Set the random number generator from seed.
     pub fn from_seed(mut self, seed: [u8; 16]) -> Self {
         self.rng = XorShiftRng::from_seed(seed);
         self
     }
 
+    /// Set the optimizer type.
     pub fn optimizer(mut self, optimizer: Optimizer) -> Self {
         self.optimizer = optimizer;
         self
     }
 
+    /// Set hyperparameters randomly: useful for hyperparameter search.
     pub fn random<R: Rng>(num_items: usize, rng: &mut R) -> Self {
         Hyperparameters {
             num_items: num_items,
@@ -169,6 +193,7 @@ impl Hyperparameters {
         }
     }
 
+    /// Build a model out of the chosen hyperparameters.
     pub fn build(mut self) -> ImplicitLSTMModel {
         let params = self.build_params();
 
@@ -285,6 +310,7 @@ struct Model {
     summed_losses: Vec<Variable<BoxedNode>>,
 }
 
+/// An LSTM-based sequence model for implicit feedback.
 #[derive(Debug, Clone)]
 pub struct ImplicitLSTMModel {
     hyper: Hyperparameters,
@@ -322,6 +348,9 @@ impl ImplicitLSTMModel {
             }) as Box<Optim>,
         }
     }
+    /// Fit the model.
+    ///
+    /// Returns the loss value.
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, &'static str> {
         let negative_item_range = Range::new(0, interactions.num_items());
 
@@ -346,7 +375,8 @@ impl ImplicitLSTMModel {
         let loss = partitions
             .par_iter_mut()
             .map(|(partition, ref mut thread_rng)| {
-                let mut model = self.params
+                let mut model = self
+                    .params
                     .build(self.hyper.max_sequence_length, &self.hyper.loss);
                 let optimizer =
                     self.optimizer(model.losses.last().unwrap().parameters(), &sync_barrier);
@@ -395,6 +425,7 @@ impl ImplicitLSTMModel {
     }
 }
 
+/// The user representation used by the `ImplicitLSTM` model.
 #[derive(Clone, Debug)]
 pub struct ImplicitLSTMUser {
     user_embedding: Vec<f32>,
@@ -406,7 +437,8 @@ impl OnlineRankingModel for ImplicitLSTMModel {
         &self,
         item_ids: &[ItemId],
     ) -> Result<Self::UserRepresentation, PredictionError> {
-        let model = self.params
+        let model = self
+            .params
             .build(self.hyper.max_sequence_length, &self.hyper.loss);
 
         let item_ids = &item_ids[item_ids

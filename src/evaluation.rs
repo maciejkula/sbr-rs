@@ -1,3 +1,4 @@
+//! Model containing evaluation functions.
 use std;
 
 use rayon::prelude::*;

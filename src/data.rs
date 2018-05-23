@@ -1,3 +1,5 @@
+//! Funcionality for manipulating data.
+
 use std;
 use std::cmp::Ordering;
 use std::hash::Hasher;
@@ -9,6 +11,7 @@ use siphasher::sip::SipHasher;
 
 use super::{ItemId, Timestamp, UserId};
 
+/// Basic interaction type.
 #[derive(Clone, Serialize, Deserialize, Debug, Eq, Hash, PartialEq)]
 pub struct Interaction {
     user_id: UserId,
@@ -17,6 +20,7 @@ pub struct Interaction {
 }
 
 impl Interaction {
+    /// Create a new interaction.
     pub fn new(user_id: UserId, item_id: ItemId, timestamp: Timestamp) -> Self {
         Interaction {
             user_id,
@@ -27,20 +31,25 @@ impl Interaction {
 }
 
 impl Interaction {
+    /// Return the user id.
     pub fn user_id(&self) -> UserId {
         self.user_id
     }
+    /// Return the item id.
     pub fn item_id(&self) -> ItemId {
         self.item_id
     }
+    /// Return the interaction weight.
     pub fn weight(&self) -> f32 {
         1.0
     }
+    /// Return the interaction timestamp.
     pub fn timestamp(&self) -> Timestamp {
         self.timestamp
     }
 }
 
+/// Randomly split interactions between test and traiing sets.
 pub fn train_test_split<R: Rng>(
     interactions: &mut Interactions,
     rng: &mut R,
@@ -53,6 +62,9 @@ pub fn train_test_split<R: Rng>(
     (train, test)
 }
 
+/// Split interactions between training and test sets so that no user is in both sets.
+/// Useful for testing generalization where we want to test the model's performance on
+/// users who have not been seen during training.
 pub fn user_based_split<R: Rng>(
     interactions: &Interactions,
     rng: &mut R,
@@ -74,6 +86,7 @@ pub fn user_based_split<R: Rng>(
     interactions.split_by(is_train)
 }
 
+/// A collection of individual interactions.
 pub struct Interactions {
     num_users: usize,
     num_items: usize,
@@ -81,6 +94,7 @@ pub struct Interactions {
 }
 
 impl Interactions {
+    /// Crate a new interactions object.
     pub fn new(num_users: usize, num_items: usize) -> Self {
         Interactions {
             num_users: num_users,
@@ -88,23 +102,27 @@ impl Interactions {
             interactions: Vec::new(),
         }
     }
-
+    /// Add a new interaction.
     pub fn push(&mut self, interaction: Interaction) {
         self.interactions.push(interaction);
     }
 
+    /// Return the underlying data.
     pub fn data(&self) -> &[Interaction] {
         &self.interactions
     }
 
+    /// Give the number of contained interactions.
     pub fn len(&self) -> usize {
         self.interactions.len()
     }
 
+    /// Shuffle the interactions in-place.
     pub fn shuffle<R: Rng>(&mut self, rng: &mut R) {
         rng.shuffle(&mut self.interactions);
     }
 
+    /// Split interactions at `idx`.
     pub fn split_at(&self, idx: usize) -> (Self, Self) {
         let head = Interactions {
             num_users: self.num_users,
@@ -120,6 +138,7 @@ impl Interactions {
         (head, tail)
     }
 
+    /// Split interactions by predicate.
     pub fn split_by<F: Fn(&Interaction) -> bool>(&self, func: F) -> (Self, Self) {
         let head = Interactions {
             num_users: self.num_users,
@@ -145,22 +164,27 @@ impl Interactions {
         (head, tail)
     }
 
+    /// Covert to triplet representation.
     pub fn to_triplet(&self) -> TripletInteractions {
         TripletInteractions::from(self)
     }
 
+    /// Convert to compressed representation.
     pub fn to_compressed(&self) -> CompressedInteractions {
         CompressedInteractions::from(self)
     }
 
+    /// Return number of users.
     pub fn num_users(&self) -> usize {
         self.num_users
     }
 
+    /// Return number of items.
     pub fn num_items(&self) -> usize {
         self.num_items
     }
 
+    /// Return (`num_users`, `num_items`).
     pub fn shape(&self) -> (usize, usize) {
         (self.num_users, self.num_items)
     }
@@ -184,17 +208,15 @@ fn cmp_timestamp(x: &Interaction, y: &Interaction) -> Ordering {
 
     if uid_comparison == Ordering::Equal {
         x.timestamp().cmp(&y.timestamp())
-    // let time_comparison =
-    // if time_comparison == Ordering::Equal {
-    //     x.item_id().cmp(&y.item_id())
-    // } else {
-    //     time_comparison
-    // }
     } else {
         uid_comparison
     }
 }
 
+/// A compressed representation of interactions, where the
+/// interactions themselves are arranged by user and by timestamp.
+///
+/// Normally created by [Interactions::to_compressed].
 pub struct CompressedInteractions {
     num_users: usize,
     num_items: usize,
@@ -235,6 +257,7 @@ impl<'a> From<&'a Interactions> for CompressedInteractions {
 }
 
 impl CompressedInteractions {
+    /// Iterate over users.
     pub fn iter_users(&self) -> CompressedInteractionsUserIterator {
         CompressedInteractionsUserIterator {
             interactions: self,
@@ -242,6 +265,7 @@ impl CompressedInteractions {
         }
     }
 
+    /// Get a particular user's interactions.
     pub fn get_user(&self, user_id: UserId) -> Option<CompressedInteractionsUser> {
         if user_id >= self.num_users {
             return None;
@@ -257,18 +281,22 @@ impl CompressedInteractions {
         })
     }
 
+    /// Return number of users.
     pub fn num_users(&self) -> usize {
         self.num_users
     }
 
+    /// Return number of items.
     pub fn num_items(&self) -> usize {
         self.num_items
     }
 
+    /// Return (`num_users`, `num_items`).
     pub fn shape(&self) -> (usize, usize) {
         (self.num_users, self.num_items)
     }
 
+    /// Convert to `Interactions`.
     pub fn to_interactions(&self) -> Interactions {
         let mut interactions = Vec::new();
 
@@ -292,25 +320,35 @@ impl CompressedInteractions {
     }
 }
 
+/// Iterator over compressed user data.
 pub struct CompressedInteractionsUserIterator<'a> {
     interactions: &'a CompressedInteractions,
     idx: usize,
 }
 
+/// A single user's data, arranged from earliest to latest.
 #[derive(Debug)]
 pub struct CompressedInteractionsUser<'a> {
+    /// User id.
     pub user_id: UserId,
+    /// The users's interactions.
     pub item_ids: &'a [ItemId],
+    /// The timestamps of the user's interactions.
     pub timestamps: &'a [Timestamp],
 }
 
 impl<'a> CompressedInteractionsUser<'a> {
+    /// Return length of interactions.
     pub fn len(&self) -> usize {
         self.item_ids.len()
     }
+    /// If there are no interactions.
     pub fn is_empty(&self) -> bool {
         self.item_ids.is_empty()
     }
+    /// Return a chunked iterator over interactions for this user.
+    /// The chunks are such that the _first_ chunk is smallest,
+    /// and the remaining chunks are all of `chunk_size`.
     pub fn chunks(&self, chunk_size: usize) -> CompressedInteractionsUserChunkIterator<'a> {
         CompressedInteractionsUserChunkIterator {
             idx: 0,
@@ -343,6 +381,9 @@ impl<'a> Iterator for CompressedInteractionsUserIterator<'a> {
     }
 }
 
+/// Chunked iterator over a user's interactions.
+/// The chunks are such that the _first_ chunk is smallest,
+/// and the remaining chunks are all of `chunk_size`.
 pub struct CompressedInteractionsUserChunkIterator<'a> {
     idx: usize,
     chunk_size: usize,
@@ -378,19 +419,22 @@ impl<'a> Iterator for CompressedInteractionsUserChunkIterator<'a> {
     }
 }
 
+/// Interactions in COO form.
 #[derive(Debug)]
 pub struct TripletInteractions {
     num_users: usize,
     num_items: usize,
     user_ids: Vec<UserId>,
-    pub item_ids: Vec<ItemId>,
+    pub(crate) item_ids: Vec<ItemId>,
     timestamps: Vec<Timestamp>,
 }
 
 impl TripletInteractions {
+    /// Return lenght.
     pub fn len(&self) -> usize {
         self.user_ids.len()
     }
+    /// Iterate over minibatches of size `minibatch_size`.
     pub fn iter_minibatch(&self, minibatch_size: usize) -> TripletMinibatchIterator {
         TripletMinibatchIterator {
             interactions: self,
@@ -445,12 +489,16 @@ impl<'a> TripletMinibatchIterator<'a> {
 
 #[derive(Debug)]
 pub struct TripletMinibatch<'a> {
+    /// User ids in the batch.
     pub user_ids: &'a [UserId],
+    /// Item ids in the batch.
     pub item_ids: &'a [ItemId],
+    /// Timestamps in the batch.
     pub timestamps: &'a [Timestamp],
 }
 
 impl<'a> TripletMinibatch<'a> {
+    /// Return lenght of the minibatch.
     pub fn len(&self) -> usize {
         self.user_ids.len()
     }
