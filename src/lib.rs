@@ -8,11 +8,11 @@
 
 #[macro_use]
 extern crate serde_derive;
-extern crate serde_json;
 
 #[macro_use]
 extern crate itertools;
 
+#[cfg(test)]
 extern crate csv;
 #[macro_use]
 extern crate failure;
