@@ -311,7 +311,7 @@ struct Model {
 }
 
 /// An LSTM-based sequence model for implicit feedback.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImplicitLSTMModel {
     hyper: Hyperparameters,
     params: Parameters,
