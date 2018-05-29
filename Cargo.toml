@@ -23,7 +23,8 @@ ndarray = { version = "0.11.0", features = ["serde-1"] }
 siphasher = "0.2.2"
 failure = "0.1.1"
 
-wyrm = { version = "0.8.1", features = ["fast-math"]}
+# wyrm = { version = "0.8.1", features = ["fast-math"]}
+wyrm = { path = "../wyrm", features = ["fast-math"]}
 
 [dev-dependencies]
 serde_json = "1.0"
@@ -32,8 +33,11 @@ criterion = "0.2.3"
 ndarray = { version = "0.11.0", features = ["blas", "serde-1"] }
 blas-src = { version = "0.1.2", default-features = false, features = ["intel-mkl"] }
 
+
 [profile.release]
 lto = true
+rpath = true
+debug = true
 
 [[bench]]
 name = "benchmark"

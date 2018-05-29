@@ -12,7 +12,7 @@ use ndarray::Axis;
 
 use wyrm;
 use wyrm::nn;
-use wyrm::optim::Optimizer as Optim;
+use wyrm::optim::{Optimizer as Optim, Optimizers, Synchronizable};
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
 use data::CompressedInteractions;
@@ -77,7 +77,7 @@ impl Hyperparameters {
             l2_penalty: 0.0,
             loss: Loss::BPR,
             optimizer: Optimizer::Adam,
-            parallelism: Parallelism::Asynchronous,
+            parallelism: Parallelism::Synchronous,
             rng: XorShiftRng::from_seed(rand::thread_rng().gen()),
             num_threads: rayon::current_num_threads(),
             num_epochs: 10,
@@ -318,34 +318,19 @@ pub struct ImplicitLSTMModel {
 }
 
 impl ImplicitLSTMModel {
-    fn optimizer(
-        &self,
-        parameters: Vec<wyrm::Variable<wyrm::ParameterNode>>,
-        barrier: &wyrm::optim::SynchronizationBarrier,
-    ) -> Box<Optim> {
+    fn optimizer(&self) -> Optimizers {
         match self.hyper.optimizer {
-            Optimizer::Adagrad => Box::new({
-                let opt = wyrm::optim::Adagrad::new(parameters)
+            Optimizer::Adagrad => Optimizers::Adagrad(
+                wyrm::optim::Adagrad::new()
                     .learning_rate(self.hyper.learning_rate)
-                    .l2_penalty(self.hyper.l2_penalty);
+                    .l2_penalty(self.hyper.l2_penalty),
+            ),
 
-                if self.hyper.parallelism == Parallelism::Synchronous {
-                    opt.synchronized(barrier)
-                } else {
-                    opt
-                }
-            }) as Box<Optim>,
-            Optimizer::Adam => Box::new({
-                let opt = wyrm::optim::Adam::new(parameters)
+            Optimizer::Adam => Optimizers::Adam(
+                wyrm::optim::Adam::new()
                     .learning_rate(self.hyper.learning_rate)
-                    .l2_penalty(self.hyper.l2_penalty);
-
-                if self.hyper.parallelism == Parallelism::Synchronous {
-                    opt.synchronized(barrier)
-                } else {
-                    opt
-                }
-            }) as Box<Optim>,
+                    .l2_penalty(self.hyper.l2_penalty),
+            ),
         }
     }
     /// Fit the model.
@@ -370,7 +355,7 @@ impl ImplicitLSTMModel {
             .map(|chunk| (chunk, XorShiftRng::from_seed(self.hyper.rng.gen())))
             .collect();
 
-        let sync_barrier = wyrm::optim::SynchronizationBarrier::new();
+        let optimizer = self.optimizer();
 
         let loss = partitions
             .par_iter_mut()
@@ -378,8 +363,18 @@ impl ImplicitLSTMModel {
                 let mut model = self
                     .params
                     .build(self.hyper.max_sequence_length, &self.hyper.loss);
-                let optimizer =
-                    self.optimizer(model.losses.last().unwrap().parameters(), &sync_barrier);
+
+                let sync_optimizer = if self.hyper.num_threads > 1
+                    && self.hyper.parallelism == Parallelism::Synchronous
+                {
+                    Some(match optimizer {
+                        Optimizers::Adagrad(ref opt) => Box::new(opt.synchronized()) as Box<Optim>,
+                        Optimizers::Adam(ref opt) => Box::new(opt.synchronized()) as Box<Optim>,
+                        Optimizers::SGD(ref opt) => Box::new(opt.synchronized()) as Box<Optim>,
+                    })
+                } else {
+                    None
+                };
 
                 let mut loss_value = 0.0;
                 let mut examples = 0;
@@ -412,7 +407,11 @@ impl ImplicitLSTMModel {
                         loss.forward();
                         loss.backward(1.0);
 
-                        optimizer.step();
+                        if let Some(ref opt) = sync_optimizer {
+                            opt.step(loss.parameters());
+                        } else {
+                            optimizer.step(loss.parameters());
+                        }
                         loss.zero_gradient();
                     }
                 }
