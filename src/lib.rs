@@ -5,7 +5,6 @@
 //! sequences of items: given previous items a user has interacted with,
 //! the model will recommend the items the user is likely to interact with
 //! in the future.
-
 #[macro_use]
 extern crate serde_derive;
 

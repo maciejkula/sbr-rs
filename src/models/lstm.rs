@@ -306,6 +306,7 @@ struct Model {
     outputs: Vec<Variable<wyrm::IndexInputNode>>,
     negatives: Vec<Variable<wyrm::IndexInputNode>>,
     hidden_states: Vec<Variable<BoxedNode>>,
+    #[allow(dead_code)]
     losses: Vec<Variable<BoxedNode>>,
     summed_losses: Vec<Variable<BoxedNode>>,
 }
@@ -350,31 +351,21 @@ impl ImplicitLSTMModel {
         self.hyper.rng.shuffle(&mut subsequences);
 
         let num_chunks = subsequences.len() / self.hyper.num_threads;
+        let optimizer = self.optimizer();
+        let sync_optim = optimizer.synchronized(self.hyper.num_threads);
+
         let mut partitions: Vec<_> = subsequences
             .chunks_mut(num_chunks)
-            .map(|chunk| (chunk, XorShiftRng::from_seed(self.hyper.rng.gen())))
+            .zip(sync_optim.into_iter())
+            .map(|(chunk, optim)| (chunk, XorShiftRng::from_seed(self.hyper.rng.gen()), optim))
             .collect();
-
-        let optimizer = self.optimizer();
 
         let loss = partitions
             .par_iter_mut()
-            .map(|(partition, ref mut thread_rng)| {
+            .map(|(partition, ref mut thread_rng, sync_optim)| {
                 let mut model = self
                     .params
                     .build(self.hyper.max_sequence_length, &self.hyper.loss);
-
-                let sync_optimizer = if self.hyper.num_threads > 1
-                    && self.hyper.parallelism == Parallelism::Synchronous
-                {
-                    Some(match optimizer {
-                        Optimizers::Adagrad(ref opt) => Box::new(opt.synchronized()) as Box<Optim>,
-                        Optimizers::Adam(ref opt) => Box::new(opt.synchronized()) as Box<Optim>,
-                        Optimizers::SGD(ref opt) => Box::new(opt.synchronized()) as Box<Optim>,
-                    })
-                } else {
-                    None
-                };
 
                 let mut loss_value = 0.0;
                 let mut examples = 0;
@@ -407,12 +398,13 @@ impl ImplicitLSTMModel {
                         loss.forward();
                         loss.backward(1.0);
 
-                        if let Some(ref opt) = sync_optimizer {
-                            opt.step(loss.parameters());
+                        if self.hyper.num_threads > 1
+                            && self.hyper.parallelism == Parallelism::Synchronous
+                        {
+                            sync_optim.step(loss.parameters());
                         } else {
                             optimizer.step(loss.parameters());
                         }
-                        loss.zero_gradient();
                     }
                 }
 
@@ -511,8 +503,7 @@ mod tests {
         Interactions::from(interactions)
     }
 
-    #[test]
-    fn fold_in() {
+    fn mrr_test(num_threads: usize, expected_avx_mrr: f32, expected_mrr: f32) {
         let mut data = load_movielens("data.csv");
 
         let mut rng = rand::XorShiftRng::from_seed([42; 16]);
@@ -530,7 +521,7 @@ mod tests {
             .loss(Loss::Hinge)
             .optimizer(Optimizer::Adagrad)
             .num_epochs(10)
-            .num_threads(1)
+            .num_threads(num_threads)
             .rng(rng)
             .build();
 
@@ -542,9 +533,9 @@ mod tests {
 
         // Results differ between different vector widths in MKL.
         let expected_mrr = if ::std::env::var("MKL_CBWR") == Ok("AVX".to_owned()) {
-            0.091
+            expected_avx_mrr
         } else {
-            0.102
+            expected_mrr
         };
 
         println!(
@@ -554,4 +545,15 @@ mod tests {
 
         assert!(test_mrr > expected_mrr)
     }
+
+    #[test]
+    fn mrr_test_single_thread() {
+        mrr_test(1, 0.091, 0.081);
+    }
+
+    #[test]
+    fn mrr_test_two_threads() {
+        mrr_test(2, 0.091, 0.074);
+    }
+
 }
