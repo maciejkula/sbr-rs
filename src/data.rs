@@ -548,6 +548,7 @@ mod tests {
 
     use rand;
     use rand::distributions::{Distribution, Uniform};
+    use rand::SeedableRng;
 
     use super::*;
 
@@ -561,7 +562,7 @@ mod tests {
         let item_range = Uniform::new(0, num_items);
         let timestamp_range = Uniform::new(0, 50);
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::XorShiftRng::from_seed([42; 16]);
 
         let interactions: Vec<_> = (0..num_interactions)
             .map(|_| Interaction {
@@ -586,7 +587,7 @@ mod tests {
         let train = train.to_compressed().to_interactions();
         let test = test.to_compressed().to_interactions();
 
-        assert!(train.len() + test.len() == interaction_set.len());
+        assert_eq!(train.len() + test.len(), interaction_set.len());
 
         for interaction in train.data().iter().chain(test.data().iter()) {
             assert!(interaction_set.contains(interaction));
