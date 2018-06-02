@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn mrr_test_two_threads() {
-        mrr_test(2, 0.091, 0.074);
+        mrr_test(2, 0.078, 0.074);
     }
 
 }
