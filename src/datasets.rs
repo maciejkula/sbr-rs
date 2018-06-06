@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use csv;
 use failure;
+use rand;
+use rand::Rng;
 use reqwest;
 
 use data::{Interaction, Interactions};
@@ -33,9 +35,16 @@ fn create_data_dir() -> Result<PathBuf, failure::Error> {
 fn download(url: &str, dest_filename: &Path) -> Result<Interactions, failure::Error> {
     let data_dir = create_data_dir()?;
     let desired_filename = data_dir.join(dest_filename);
-    let temp_filename = env::temp_dir().join(dest_filename);
 
     if !desired_filename.exists() {
+        let temp_filename = env::temp_dir().join(format!(
+            "{}",
+            rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(10)
+                .collect::<String>()
+        ));
+
         let file = File::create(&temp_filename)?;
         let mut writer = BufWriter::new(file);
 
