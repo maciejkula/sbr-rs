@@ -24,12 +24,14 @@ fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
 }
 
 /// The loss used for training the model.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Loss {
     /// Bayesian Personalised Ranking.
     BPR,
     /// Pairwise hinge loss.
     Hinge,
+    /// WARP
+    WARP,
 }
 
 /// Optimizer user to train the model.
@@ -305,7 +307,7 @@ impl Parameters {
             .zip(negative_predictions.into_iter())
             .map(|(pos, neg)| match hyper.loss {
                 Loss::BPR => (neg - pos).sigmoid().boxed(),
-                Loss::Hinge => (1.0 + neg - pos).relu().boxed(),
+                Loss::Hinge | Loss::WARP => (1.0 + neg - pos).relu().boxed(),
             })
             .collect();
 
@@ -399,16 +401,30 @@ impl ImplicitLSTMModel {
                     thread_rng.shuffle(partition);
 
                     for &item_ids in partition.iter() {
-                        for (&input_idx, &output_idx, input, output, negative) in izip!(
+                        for (&input_idx, &output_idx, input, output, negative, hidden) in izip!(
                             item_ids,
                             item_ids.iter().skip(1),
                             &mut model.inputs,
                             &mut model.outputs,
-                            &mut model.negatives
+                            &mut model.negatives,
+                            &model.hidden_states
                         ) {
-                            let negative_idx = negative_item_range.sample(thread_rng);
-
                             input.set_value(input_idx);
+
+                            let negative_idx = if self.hyper.loss == Loss::WARP {
+                                hidden.forward();
+                                let hidden_state = hidden.value();
+
+                                self.sample_warp_negative(
+                                    hidden_state.as_slice().unwrap(),
+                                    output_idx,
+                                    &negative_item_range,
+                                    thread_rng,
+                                )
+                            } else {
+                                negative_item_range.sample(thread_rng)
+                            };
+
                             output.set_value(output_idx);
                             negative.set_value(negative_idx);
                         }
@@ -416,6 +432,14 @@ impl ImplicitLSTMModel {
                         // Get the loss at the end of the sequence.
                         let loss_idx = item_ids.len().saturating_sub(2);
                         let loss = &mut model.summed_losses[loss_idx];
+
+                        // We need to clear the graph if the loss is WARP
+                        // in order for backpropagation to trigger correctly.
+                        // This is because by calling forward we've added the
+                        // resulting nodes to the graph.
+                        if self.hyper.loss == Loss::WARP {
+                            &model.hidden_states[loss_idx].clear();
+                        }
 
                         loss_value += loss.value().scalar_sum();
                         examples += loss_idx + 1;
@@ -438,6 +462,43 @@ impl ImplicitLSTMModel {
             .sum();
 
         Ok(loss)
+    }
+
+    fn sample_warp_negative(
+        &self,
+        hidden_state: &[f32],
+        positive_idx: usize,
+        negative_item_range: &Range<usize>,
+        thread_rng: &mut XorShiftRng,
+    ) -> usize {
+        let pos_prediction = self.predict_single(hidden_state, positive_idx);
+
+        let mut negative_idx = 0;
+
+        for _ in 0..5 {
+            negative_idx = negative_item_range.sample(thread_rng);
+            let neg_prediction = self.predict_single(hidden_state, negative_idx);
+
+            if 1.0 - pos_prediction + neg_prediction > 0.0 {
+                break;
+            }
+        }
+
+        negative_idx
+    }
+
+    fn predict_single(&self, user: &[f32], item_idx: usize) -> f32 {
+        let item_embeddings = &self.params.item_embedding;
+        let item_biases = &self.params.item_biases;
+
+        let embeddings = item_embeddings.value();
+        let biases = item_biases.value();
+
+        let embedding = embeddings.subview(Axis(0), item_idx);
+        let bias = biases[(item_idx, 0)];
+        let dot = wyrm::simd_dot(user, embedding.as_slice().unwrap());
+
+        bias + dot
     }
 }
 
@@ -479,6 +540,7 @@ impl OnlineRankingModel for ImplicitLSTMModel {
             user_embedding: representation.as_slice().unwrap().to_owned(),
         })
     }
+
     fn predict(
         &self,
         user: &Self::UserRepresentation,
@@ -513,21 +575,13 @@ impl OnlineRankingModel for ImplicitLSTMModel {
 mod tests {
     use std::time::Instant;
 
-    use csv;
-
     use super::*;
-    use data::{user_based_split, Interaction, Interactions};
+    use data::user_based_split;
+    use datasets::download_movielens_100k;
     use evaluation::mrr_score;
 
-    fn load_movielens(path: &str) -> Interactions {
-        let mut reader = csv::Reader::from_path(path).unwrap();
-        let interactions: Vec<Interaction> = reader.deserialize().map(|x| x.unwrap()).collect();
-
-        Interactions::from(interactions)
-    }
-
     fn mrr_test(num_threads: usize, expected_avx_mrr: f32, expected_mrr: f32) {
-        let mut data = load_movielens("data.csv");
+        let mut data = download_movielens_100k().unwrap();
 
         let mut rng = rand::XorShiftRng::from_seed([42; 16]);
 
