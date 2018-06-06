@@ -443,6 +443,8 @@ impl TripletInteractions {
             minibatch_size: minibatch_size,
         }
     }
+
+    /// Return a collection of iterators over a partitions of the data.
     pub fn iter_minibatch_partitioned(
         &self,
         minibatch_size: usize,
@@ -455,19 +457,24 @@ impl TripletInteractions {
             .map(|x| iterator.slice(x * chunk_size, (x + 1) * chunk_size))
             .collect()
     }
+
+    /// Return number of users in the dataset.
     pub fn num_users(&self) -> usize {
         self.num_users
     }
 
+    /// Return number of users in the dataset.
     pub fn num_items(&self) -> usize {
         self.num_items
     }
 
+    /// Return (num_users, num_items).
     pub fn shape(&self) -> (usize, usize) {
         (self.num_users, self.num_items)
     }
 }
 
+/// Iterator over minibatches of triplet interactions.
 #[derive(Clone, Debug)]
 pub struct TripletMinibatchIterator<'a> {
     interactions: &'a TripletInteractions,
@@ -477,6 +484,7 @@ pub struct TripletMinibatchIterator<'a> {
 }
 
 impl<'a> TripletMinibatchIterator<'a> {
+    /// Slice the iterator, yielding an iterator over a subslice of the data.
     pub fn slice(&self, start: usize, stop: usize) -> TripletMinibatchIterator<'a> {
         TripletMinibatchIterator {
             interactions: self.interactions,
@@ -487,6 +495,7 @@ impl<'a> TripletMinibatchIterator<'a> {
     }
 }
 
+/// A minibatch of triplet interactions.
 #[derive(Debug)]
 pub struct TripletMinibatch<'a> {
     /// User ids in the batch.
