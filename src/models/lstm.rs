@@ -576,32 +576,18 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use data::user_based_split;
+    use data::{user_based_split, Interactions};
     use datasets::download_movielens_100k;
     use evaluation::mrr_score;
 
-    fn mrr_test(num_threads: usize, expected_avx_mrr: f32, expected_mrr: f32) {
-        let mut data = download_movielens_100k().unwrap();
-
+    fn run_test(mut data: Interactions, hyperparameters: Hyperparameters) -> (f32, f32) {
         let mut rng = rand::XorShiftRng::from_seed([42; 16]);
 
         let (train, test) = user_based_split(&mut data, &mut rng, 0.2);
         let train_mat = train.to_compressed();
         let test_mat = test.to_compressed();
 
-        println!("Train: {}, test: {}", train.len(), test.len());
-
-        let mut model = Hyperparameters::new(data.num_items(), 128)
-            .embedding_dim(32)
-            .learning_rate(0.16)
-            .l2_penalty(0.0004)
-            .lstm_variant(LSTMVariant::Normal)
-            .loss(Loss::Hinge)
-            .optimizer(Optimizer::Adagrad)
-            .num_epochs(10)
-            .num_threads(num_threads)
-            .rng(rng)
-            .build();
+        let mut model = hyperparameters.rng(rng).build();
 
         let start = Instant::now();
         let loss = model.fit(&train_mat).unwrap();
@@ -609,29 +595,84 @@ mod tests {
         let train_mrr = mrr_score(&model, &train_mat).unwrap();
         let test_mrr = mrr_score(&model, &test_mat).unwrap();
 
-        // Results differ between different vector widths in MKL.
-        let expected_mrr = if ::std::env::var("MKL_CBWR") == Ok("AVX".to_owned()) {
-            expected_avx_mrr
-        } else {
-            expected_mrr
-        };
-
         println!(
             "Train MRR {} at loss {} and test MRR {} (in {:?})",
             train_mrr, loss, test_mrr, elapsed
         );
 
-        assert!(test_mrr > expected_mrr)
+        (test_mrr, train_mrr)
     }
 
     #[test]
     fn mrr_test_single_thread() {
-        mrr_test(1, 0.091, 0.081);
+        let data = download_movielens_100k().unwrap();
+
+        let hyperparameters = Hyperparameters::new(data.num_items(), 128)
+            .embedding_dim(32)
+            .learning_rate(0.16)
+            .l2_penalty(0.0004)
+            .lstm_variant(LSTMVariant::Normal)
+            .loss(Loss::Hinge)
+            .optimizer(Optimizer::Adagrad)
+            .num_epochs(10)
+            .num_threads(1);
+
+        let (test_mrr, _) = run_test(data, hyperparameters);
+
+        let expected_mrr = match ::std::env::var("MKL_CBWR") {
+            Ok(ref val) if val == "AVX" => 0.091,
+            _ => 0.081,
+        };
+
+        assert!(test_mrr > expected_mrr)
     }
 
     #[test]
     fn mrr_test_two_threads() {
-        mrr_test(2, 0.078, 0.074);
+        let data = download_movielens_100k().unwrap();
+
+        let hyperparameters = Hyperparameters::new(data.num_items(), 128)
+            .embedding_dim(32)
+            .learning_rate(0.16)
+            .l2_penalty(0.0004)
+            .lstm_variant(LSTMVariant::Normal)
+            .loss(Loss::Hinge)
+            .optimizer(Optimizer::Adagrad)
+            .num_epochs(10)
+            .num_threads(2);
+
+        let (test_mrr, _) = run_test(data, hyperparameters);
+
+        let expected_mrr = match ::std::env::var("MKL_CBWR") {
+            Ok(ref val) if val == "AVX" => 0.078,
+            _ => 0.074,
+        };
+
+        assert!(test_mrr > expected_mrr)
+    }
+
+    #[test]
+    fn mrr_test_warp() {
+        let data = download_movielens_100k().unwrap();
+
+        let hyperparameters = Hyperparameters::new(data.num_items(), 128)
+            .embedding_dim(32)
+            .learning_rate(0.16)
+            .l2_penalty(0.0004)
+            .lstm_variant(LSTMVariant::Normal)
+            .loss(Loss::WARP)
+            .optimizer(Optimizer::Adagrad)
+            .num_epochs(10)
+            .num_threads(1);
+
+        let (test_mrr, _) = run_test(data, hyperparameters);
+
+        let expected_mrr = match ::std::env::var("MKL_CBWR") {
+            Ok(ref val) if val == "AVX" => 0.089,
+            _ => 0.10,
+        };
+
+        assert!(test_mrr > expected_mrr)
     }
 
 }
