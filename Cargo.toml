@@ -1,6 +1,6 @@
 [package]
 name = "sbr"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Maciej Kula"]
 license = "MIT"
 description = "Recommender models."
@@ -29,7 +29,6 @@ wyrm = { version = "0.9.1", features = ["fast-math"]}
 
 [dev-dependencies]
 serde_json = "1.0"
-csv = "1.0.0"
 criterion = "0.2.3"
 ndarray = { version = "0.11.0", features = ["blas", "serde-1"] }
 blas-src = { version = "0.1.2", default-features = false, features = ["intel-mkl"] }
