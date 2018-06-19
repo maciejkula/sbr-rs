@@ -88,6 +88,14 @@ pub enum PredictionError {
     InvalidPredictionValue,
 }
 
+/// Fitting error types.
+#[derive(Debug, Fail)]
+pub enum FittingError {
+    /// No interactions were given.
+    #[fail(display = "No interactions were supplied.")]
+    NoInteractions,
+}
+
 /// Trait describing models that can compute predictions given
 /// a user's sequences of past interactions.
 pub trait OnlineRankingModel {
