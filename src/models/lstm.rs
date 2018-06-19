@@ -16,7 +16,7 @@ use wyrm::optim::{Optimizer as Optim, Optimizers, Synchronizable};
 use wyrm::{Arr, BoxedNode, DataInput, Variable};
 
 use data::CompressedInteractions;
-use {ItemId, OnlineRankingModel, PredictionError};
+use {FittingError, ItemId, OnlineRankingModel, PredictionError};
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     let normal = Normal::new(0.0, 1.0 / cols as f64);
@@ -366,7 +366,7 @@ impl ImplicitLSTMModel {
     /// Fit the model.
     ///
     /// Returns the loss value.
-    pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, &'static str> {
+    pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, FittingError> {
         let negative_item_range = Range::new(0, interactions.num_items());
 
         let mut subsequences: Vec<_> = interactions
@@ -378,6 +378,10 @@ impl ImplicitLSTMModel {
             })
             .collect();
         self.hyper.rng.shuffle(&mut subsequences);
+
+        if subsequences.len() == 0 {
+            return Err(FittingError::NoInteractions);
+        }
 
         let num_chunks = subsequences.len() / self.hyper.num_threads;
         let optimizer = self.optimizer();
@@ -673,6 +677,16 @@ mod tests {
         };
 
         assert!(test_mrr > expected_mrr)
+    }
+
+    #[test]
+    fn empty_interactions() {
+        let data = Interactions::new(100, 100).to_compressed();
+        let mut model = Hyperparameters::new(100, 100).build();
+        match model.fit(&data) {
+            Err(FittingError::NoInteractions) => {}
+            _ => panic!("No error returned."),
+        }
     }
 
 }
