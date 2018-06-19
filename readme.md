@@ -1,15 +1,17 @@
-# SBR
+# sbr
 
 [![Build Status](https://travis-ci.org/maciejkula/sbr-rs.svg?branch=master)](https://travis-ci.org/maciejkula/sbr-rs)
 
 An implementation of sequence recommenders based on the [wyrm](https://github.com/maciejkula/wyrm) autdifferentiaton library.
+
+## sbr-rs
 
 `sbr` implements efficient recommender algorithms which operate on
 sequences of items: given previous items a user has interacted with,
 the model will recommend the items the user is likely to interact with
 in the future.
 
-## Example
+### Example
 You can fit a model on the Movielens 100K dataset in about 10 seconds:
 
 ```rust
@@ -47,4 +49,3 @@ println!(
 ```
 
 License: MIT
-
