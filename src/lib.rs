@@ -1,4 +1,4 @@
-#![deny(missing_docs)]
+#![deny(missing_docs, missing_debug_implementations)]
 //! # sbr-rs
 //!
 //! `sbr` implements efficient recommender algorithms which operate on

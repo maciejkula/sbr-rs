@@ -87,6 +87,7 @@ pub fn user_based_split<R: Rng>(
 }
 
 /// A collection of individual interactions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Interactions {
     num_users: usize,
     num_items: usize,
@@ -217,6 +218,7 @@ fn cmp_timestamp(x: &Interaction, y: &Interaction) -> Ordering {
 /// interactions themselves are arranged by user and by timestamp.
 ///
 /// Normally created by [Interactions::to_compressed].
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompressedInteractions {
     num_users: usize,
     num_items: usize,
@@ -321,13 +323,14 @@ impl CompressedInteractions {
 }
 
 /// Iterator over compressed user data.
+#[derive(Clone, Debug)]
 pub struct CompressedInteractionsUserIterator<'a> {
     interactions: &'a CompressedInteractions,
     idx: usize,
 }
 
 /// A single user's data, arranged from earliest to latest.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompressedInteractionsUser<'a> {
     /// User id.
     pub user_id: UserId,
@@ -384,6 +387,7 @@ impl<'a> Iterator for CompressedInteractionsUserIterator<'a> {
 /// Chunked iterator over a user's interactions.
 /// The chunks are such that the _first_ chunk is smallest,
 /// and the remaining chunks are all of `chunk_size`.
+#[derive(Debug, Clone)]
 pub struct CompressedInteractionsUserChunkIterator<'a> {
     idx: usize,
     chunk_size: usize,
@@ -420,7 +424,7 @@ impl<'a> Iterator for CompressedInteractionsUserChunkIterator<'a> {
 }
 
 /// Interactions in COO form.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TripletInteractions {
     num_users: usize,
     num_items: usize,
@@ -496,7 +500,7 @@ impl<'a> TripletMinibatchIterator<'a> {
 }
 
 /// A minibatch of triplet interactions.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TripletMinibatch<'a> {
     /// User ids in the batch.
     pub user_ids: &'a [UserId],
