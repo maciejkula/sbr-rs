@@ -1,59 +1,30 @@
-use std::ops::Deref;
+//! Module for EWMA-based models.
 use std::sync::Arc;
 
 use rand;
-use rand::distributions::{Distribution, Exp, IndependentSample, Normal, Range, Sample, Uniform};
+use rand::distributions::{Distribution, Normal, Uniform};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
-use rayon::prelude::*;
 
 use ndarray::Axis;
 
 use wyrm;
-use wyrm::optim::{Optimizer as Optim, Optimizers, Synchronizable};
-use wyrm::{Arr, BoxedNode, DataInput, Variable};
+use wyrm::optim::Optimizers;
+use wyrm::{Arr, BoxedNode, Variable};
 
+use super::sequence_model::{fit_sequence_model, SequenceModel, SequenceModelParameters};
+use super::{ImplicitUser, Loss, Optimizer, Parallelism};
 use data::CompressedInteractions;
 use {FittingError, ItemId, OnlineRankingModel, PredictionError};
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     let normal = Normal::new(0.0, 1.0 / cols as f64);
     Arr::zeros((rows, cols)).map(|_| normal.sample(rng) as f32)
-    // Arr::zeros((rows, cols)).map(|_| (rng.gen::<f32>() - 0.5) / (cols as f32).sqrt())
 }
 
 fn dense_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     let normal = Normal::new(0.0, (2.0 / (rows + cols) as f64).sqrt());
-    Arr::zeros((rows, cols)).map(|_| normal.ind_sample(rng) as f32)
-}
-
-/// The loss used for training the model.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Loss {
-    /// Bayesian Personalised Ranking.
-    BPR,
-    /// Pairwise hinge loss.
-    Hinge,
-    /// WARP
-    WARP,
-}
-
-/// Optimizer user to train the model.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Optimizer {
-    /// Adagrad.
-    Adagrad,
-    /// Adam.
-    Adam,
-}
-
-/// Type of parallelism used to train the model.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Parallelism {
-    /// Multiple threads operate in parallel without any locking.
-    Asynchronous,
-    /// Multiple threads synchronise parameters between minibatches.
-    Synchronous,
+    Arr::zeros((rows, cols)).map(|_| normal.sample(rng) as f32)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,7 +149,7 @@ impl Hyperparameters {
         }
     }
 
-    fn build_params(&mut self) -> Parameters {
+    fn build_params(mut self) -> Parameters {
         let item_embeddings = Arc::new(wyrm::HogwildParameter::new(embedding_init(
             self.num_items,
             self.item_embedding_dim,
@@ -202,7 +173,7 @@ impl Hyperparameters {
         )));
 
         Parameters {
-            max_sequence_length: self.max_sequence_length,
+            hyper: self,
             item_embedding: item_embeddings,
             item_biases: item_biases,
             alpha: alpha,
@@ -211,19 +182,16 @@ impl Hyperparameters {
         }
     }
 
-    pub fn build(mut self) -> ImplicitEWMAModel {
+    pub fn build(self) -> ImplicitEWMAModel {
         let params = self.build_params();
 
-        ImplicitEWMAModel {
-            hyper: self,
-            params: params,
-        }
+        ImplicitEWMAModel { params: params }
     }
 }
 
 #[derive(Debug)]
 struct Parameters {
-    max_sequence_length: usize,
+    hyper: Hyperparameters,
     item_embedding: Arc<wyrm::HogwildParameter>,
     item_biases: Arc<wyrm::HogwildParameter>,
     alpha: Arc<wyrm::HogwildParameter>,
@@ -234,7 +202,7 @@ struct Parameters {
 impl Clone for Parameters {
     fn clone(&self) -> Self {
         Parameters {
-            max_sequence_length: self.max_sequence_length,
+            hyper: self.hyper.clone(),
             item_embedding: Arc::new(self.item_embedding.as_ref().clone()),
             item_biases: Arc::new(self.item_biases.as_ref().clone()),
             alpha: Arc::new(self.alpha.as_ref().clone()),
@@ -244,23 +212,53 @@ impl Clone for Parameters {
     }
 }
 
-impl Parameters {
-    fn build(&self, hyper: &Hyperparameters) -> Model {
+impl SequenceModelParameters for Parameters {
+    type Output = Model;
+    fn max_sequence_length(&self) -> usize {
+        self.hyper.max_sequence_length
+    }
+    fn num_threads(&self) -> usize {
+        self.hyper.num_threads
+    }
+    fn rng(&mut self) -> &mut XorShiftRng {
+        &mut self.hyper.rng
+    }
+    fn optimizer(&self) -> Optimizers {
+        match self.hyper.optimizer {
+            Optimizer::Adagrad => Optimizers::Adagrad(
+                wyrm::optim::Adagrad::new()
+                    .learning_rate(self.hyper.learning_rate)
+                    .l2_penalty(self.hyper.l2_penalty),
+            ),
+
+            Optimizer::Adam => Optimizers::Adam(
+                wyrm::optim::Adam::new()
+                    .learning_rate(self.hyper.learning_rate)
+                    .l2_penalty(self.hyper.l2_penalty),
+            ),
+        }
+    }
+    fn parallelism(&self) -> &Parallelism {
+        &self.hyper.parallelism
+    }
+    fn loss(&self) -> &Loss {
+        &self.hyper.loss
+    }
+    fn num_epochs(&self) -> usize {
+        self.hyper.num_epochs
+    }
+    fn build(&self) -> Model {
         let item_embeddings = wyrm::ParameterNode::shared(self.item_embedding.clone());
         let item_biases = wyrm::ParameterNode::shared(self.item_biases.clone());
         let alpha = wyrm::ParameterNode::shared(self.alpha.clone());
-        // let alpha = wyrm::InputNode::new(Arr::zeros((1, self.item_embedding.value().cols())));
-        // alpha.set_value(1.0);
-        let fc1 = wyrm::ParameterNode::shared(self.fc1.clone());
-        // let fc2 = wyrm::ParameterNode::shared(self.fc2.clone());
 
-        let inputs: Vec<_> = (0..self.max_sequence_length)
+        let inputs: Vec<_> = (0..self.hyper.max_sequence_length)
             .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
             .collect();
-        let outputs: Vec<_> = (0..self.max_sequence_length)
+        let outputs: Vec<_> = (0..self.hyper.max_sequence_length)
             .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
             .collect();
-        let negatives: Vec<_> = (0..self.max_sequence_length)
+        let negatives: Vec<_> = (0..self.hyper.max_sequence_length)
             .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
             .collect();
 
@@ -285,16 +283,10 @@ impl Parameters {
             .map(|negative| item_biases.index(negative))
             .collect();
 
-        let ones = wyrm::InputNode::new(Arr::zeros((
-            self.alpha.value().rows(),
-            self.alpha.value().cols(),
-        )));
-        ones.set_value(1.0);
-
         let alpha = alpha.sigmoid();
-        let one_minus_alpha = ones - alpha.clone();
+        let one_minus_alpha = 1.0 - alpha.clone();
 
-        let mut states = Vec::with_capacity(self.max_sequence_length);
+        let mut states = Vec::with_capacity(self.hyper.max_sequence_length);
         let initial_state = input_embeddings.first().unwrap().clone().boxed();
         states.push(initial_state);
         for input in &input_embeddings[1..] {
@@ -320,7 +312,7 @@ impl Parameters {
         let losses: Vec<_> = positive_predictions
             .into_iter()
             .zip(negative_predictions.into_iter())
-            .map(|(pos, neg)| match hyper.loss {
+            .map(|(pos, neg)| match self.hyper.loss {
                 Loss::BPR => (neg - pos).sigmoid().boxed(),
                 Loss::Hinge | Loss::WARP => (1.0 + neg - pos).relu().boxed(),
             })
@@ -338,10 +330,22 @@ impl Parameters {
             inputs: inputs,
             outputs: outputs,
             negatives: negatives,
-            states: states,
-            losses: losses,
+            hidden_states: states,
             summed_losses: summed_losses,
         }
+    }
+    fn predict_single(&self, user: &[f32], item_idx: usize) -> f32 {
+        let item_embeddings = &self.item_embedding;
+        let item_biases = &self.item_biases;
+
+        let embeddings = item_embeddings.value();
+        let biases = item_biases.value();
+
+        let embedding = embeddings.subview(Axis(0), item_idx);
+        let bias = biases[(item_idx, 0)];
+        let dot = wyrm::simd_dot(user, embedding.as_slice().unwrap());
+
+        bias + dot
     }
 }
 
@@ -349,140 +353,60 @@ struct Model {
     inputs: Vec<Variable<wyrm::IndexInputNode>>,
     outputs: Vec<Variable<wyrm::IndexInputNode>>,
     negatives: Vec<Variable<wyrm::IndexInputNode>>,
-    states: Vec<Variable<BoxedNode>>,
-    losses: Vec<Variable<BoxedNode>>,
+    hidden_states: Vec<Variable<BoxedNode>>,
     summed_losses: Vec<Variable<BoxedNode>>,
+}
+
+impl SequenceModel for Model {
+    fn state(
+        &self,
+    ) -> (
+        &[Variable<wyrm::IndexInputNode>],
+        &[Variable<wyrm::IndexInputNode>],
+        &[Variable<wyrm::IndexInputNode>],
+        &[Variable<BoxedNode>],
+    ) {
+        (
+            &self.inputs,
+            &self.outputs,
+            &self.negatives,
+            &self.hidden_states,
+        )
+    }
+    fn losses(&mut self) -> &mut [Variable<BoxedNode>] {
+        &mut self.summed_losses
+    }
+    fn hidden_states(&mut self) -> &mut [Variable<BoxedNode>] {
+        &mut self.hidden_states
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ImplicitEWMAModel {
-    hyper: Hyperparameters,
     params: Parameters,
 }
 
 impl ImplicitEWMAModel {
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, FittingError> {
-        let negative_item_range = Range::new(0, interactions.num_items());
-        // TODO: parallelism
-
-        let mut data: Vec<_> = interactions
-            .iter_users()
-            .filter(|user| !user.is_empty())
-            .collect();
-        self.hyper.rng.shuffle(&mut data);
-
-        let num_chunks = data.len() / self.hyper.num_threads;
-
-        let mut data: Vec<_> = data.chunks_mut(num_chunks).collect();
-
-        let mut loss_value = 0.0;
-
-        data.par_iter_mut().for_each(|data| {
-            let mut model = self.params.build(&self.hyper);
-            let optimizer = wyrm::optim::Adagrad::default()
-                .learning_rate(self.hyper.learning_rate)
-                .l2_penalty(self.hyper.l2_penalty);
-
-            for _ in 0..self.hyper.num_epochs {
-                rand::thread_rng().shuffle(data);
-                for user in data.iter() {
-                    // Cap item_ids to be at most `max_sequence_length` elements,
-                    // cutting off early parts of the sequence if necessary.
-                    let item_ids = &user.item_ids[user.item_ids.len().saturating_sub(
-                        self.hyper.max_sequence_length,
-                    )..];
-
-                    if item_ids.len() < 2 {
-                        continue;
-                    }
-
-                    for (i, &input_idx, &output_idx, input, output, negative) in izip!(
-                        0..item_ids.len(),
-                        item_ids,
-                        &item_ids[1..],
-                        &mut model.inputs,
-                        &mut model.outputs,
-                        &mut model.negatives
-                    ) {
-                        let negative_idx = negative_item_range.ind_sample(&mut rand::thread_rng());
-                        input.set_value(input_idx);
-                        output.set_value(output_idx);
-                        negative.set_value(negative_idx);
-                    }
-
-                    // Get the loss at the end of the sequence.
-                    let loss_idx = item_ids.len().saturating_sub(2);
-                    let loss = &mut model.summed_losses[loss_idx];
-
-                    loss.forward();
-                    loss.backward(1.0 / (loss_idx + 1) as f32);
-                    optimizer.step(loss.parameters());
-                    loss.zero_gradient();
-                }
-            }
-        });
-
-        Ok(0.0)
+        fit_sequence_model(interactions, &mut self.params)
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ImplicitLSTMUser {
-    user_embedding: Vec<f32>,
-}
-
 impl OnlineRankingModel for ImplicitEWMAModel {
-    type UserRepresentation = ImplicitLSTMUser;
+    type UserRepresentation = ImplicitUser;
     fn user_representation(
         &self,
         item_ids: &[ItemId],
     ) -> Result<Self::UserRepresentation, PredictionError> {
-        let model = self.params.build(&self.hyper);
-        let item_ids = &item_ids[item_ids
-                                     .len()
-                                     .saturating_sub(self.hyper.max_sequence_length)..];
-
-        for (&input_idx, input) in izip!(item_ids, &model.inputs) {
-            input.set_value(input_idx);
-        }
-
-        // Select the hidden state after ingesting all the inputs.
-        let state = &model.states[item_ids.len().saturating_sub(1)];
-
-        // Run the network forward up to that point. Remember to reset
-        // the cached state.
-        state.zero_gradient();
-        state.forward();
-
-        // Get the value.
-        let representation = state.value();
-
-        Ok(ImplicitLSTMUser {
-            user_embedding: representation.as_slice().unwrap().to_owned(),
-        })
+        self.params.user_representation(item_ids)
     }
+
     fn predict(
         &self,
         user: &Self::UserRepresentation,
         item_ids: &[ItemId],
     ) -> Result<Vec<f32>, PredictionError> {
-        let item_embeddings = &self.params.item_embedding;
-        let item_biases = &self.params.item_biases;
-
-        let embeddings = item_embeddings.value();
-        let biases = item_biases.value();
-
-        let predictions: Vec<f32> = item_ids
-            .iter()
-            .map(|&item_idx| {
-                let embedding = embeddings.subview(Axis(0), item_idx);
-                let bias = biases[(item_idx, 0)];
-
-                bias + wyrm::simd_dot(&user.user_embedding, embedding.as_slice().unwrap())
-            })
-            .collect();
-
-        Ok(predictions)
+        self.params.predict(user, item_ids)
     }
 }
 
@@ -535,94 +459,32 @@ mod tests {
 
         let expected_mrr = match ::std::env::var("MKL_CBWR") {
             Ok(ref val) if val == "AVX" => 0.091,
-            _ => 0.081,
+            _ => 0.11,
         };
 
         assert!(test_mrr > expected_mrr)
     }
 
-    // #[test]
-    // fn fold_in() {
-    //     let mut data = load_movielens("data_1M.csv");
+    #[test]
+    fn mrr_test_warp() {
+        let data = download_movielens_100k().unwrap();
 
-    //     let mut rng = rand::XorShiftRng::from_seed([42; 16]);
+        let hyperparameters = Hyperparameters::new(data.num_items(), 128)
+            .embedding_dim(32)
+            .learning_rate(0.16)
+            .l2_penalty(0.0004)
+            .loss(Loss::WARP)
+            .optimizer(Optimizer::Adagrad)
+            .num_epochs(10)
+            .num_threads(1);
 
-    //     let (train, test) = user_based_split(&mut data, &mut rand::thread_rng(), 0.2);
+        let (test_mrr, _) = run_test(data, hyperparameters);
 
-    //     println!("Train: {}, test: {}", train.len(), test.len());
+        let expected_mrr = match ::std::env::var("MKL_CBWR") {
+            Ok(ref val) if val == "AVX" => 0.089,
+            _ => 0.14,
+        };
 
-    //     let mut model = Hyperparameters::new(train.num_items(), 32)
-    //         .embedding_dim(8)
-    //         .l2_penalty(1e-6)
-    //         .learning_rate(0.01)
-    //         .build();
-
-    //     let num_epochs = 100;
-    //     let all_mat = data.to_compressed();
-    //     let train_mat = train.to_compressed();
-    //     let test_mat = test.to_compressed();
-
-    //     let train_items = train_mat
-    //         .iter_users()
-    //         .flat_map(|x| x.item_ids.last())
-    //         .collect::<std::collections::HashSet<_>>();
-    //     let test_items = test_mat
-    //         .iter_users()
-    //         .flat_map(|x| x.item_ids.last())
-    //         .collect::<std::collections::HashSet<_>>();
-
-    //     println!(
-    //         "Train size {}, test size {}, intersection size: {:#?}",
-    //         train_items.len(),
-    //         test_items.len(),
-    //         train_items.intersection(&test_items).count(),
-    //     );
-
-    //     let train_items = train_mat
-    //         .iter_users()
-    //         .flat_map(|x| x.item_ids)
-    //         .collect::<std::collections::HashSet<_>>();
-    //     let test_items = test_mat
-    //         .iter_users()
-    //         .flat_map(|x| x.item_ids)
-    //         .collect::<std::collections::HashSet<_>>();
-
-    //     println!(
-    //         "ALL ITEMS: Train size {}, test size {}, intersection size: {:#?}",
-    //         train_items.len(),
-    //         test_items.len(),
-    //         train_items.intersection(&test_items).count(),
-    //     );
-
-    //     for _ in 0..num_epochs {
-    //         println!("Loss: {}", model.fit(&train_mat).unwrap());
-    //         //println!("Loss: {}", model.fit(&all_mat).unwrap());
-    //         let mrr = mrr_score(&model, &test_mat).unwrap();
-    //         println!("Test MRR {}", mrr);
-    //         let mrr = mrr_score(&model, &train_mat).unwrap();
-    //         println!("Train MRR {}", mrr);
-    //     }
-    //     let mrr = mrr_score(&model, &train.to_compressed()).unwrap();
-    //     println!("MRR {}", mrr);
-    //     let mrr = mrr_score(&model, &test.to_compressed()).unwrap();
-    //     println!("MRR {}", mrr);
-
-    //     //assert!(mrr > 0.065);
-    // }
-
-    //     #[bench]
-    //     fn bench_movielens(b: &mut Bencher) {
-    //         let data = load_movielens("data.csv");
-    //         let num_epochs = 2;
-
-    //         let mut model = ImplicitFactorizationModel::default();
-
-    //         let data = data.to_triplet();
-
-    //         model.fit(&data, num_epochs).unwrap();
-
-    //         b.iter(|| {
-    //             model.fit(&data, num_epochs).unwrap();
-    //         });
-    //     }
+        assert!(test_mrr > expected_mrr)
+    }
 }

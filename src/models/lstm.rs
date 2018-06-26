@@ -1,5 +1,4 @@
 //! Module for LSTM-based models.
-
 use std::sync::Arc;
 
 use rand;
@@ -394,12 +393,6 @@ impl ImplicitLSTMModel {
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, FittingError> {
         fit_sequence_model(interactions, &mut self.params)
     }
-}
-
-/// The user representation used by the `ImplicitLSTM` model.
-#[derive(Clone, Debug)]
-pub struct ImplicitLSTMUser {
-    user_embedding: Vec<f32>,
 }
 
 impl OnlineRankingModel for ImplicitLSTMModel {

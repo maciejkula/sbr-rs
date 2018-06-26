@@ -1,5 +1,5 @@
 //! Models module.
-// pub mod ewma;
+pub mod ewma;
 pub mod lstm;
 mod sequence_model;
 
