@@ -1,10 +1,19 @@
-// #![deny(missing_docs, missing_debug_implementations)]
+#![deny(missing_docs, missing_debug_implementations)]
 //! # sbr-rs
 //!
 //! `sbr` implements efficient recommender algorithms which operate on
 //! sequences of items: given previous items a user has interacted with,
 //! the model will recommend the items the user is likely to interact with
 //! in the future.
+//!
+//! Implemented models:
+//! - LSTM: a model that uses an LSTM network over the sequence of a user's interaction
+//!         to predict their next action;
+//! - EWMA: a model that uses a simpler exponentially-weighted average of past actions
+//!         to predict future interactions.
+//!
+//! Which model performs the best will depend on your dataset. The EWMA model is much
+//! quicker to fit, and will probably be a good starting point.
 //!
 //! ## Example
 //! You can fit a model on the Movielens 100K dataset in about 10 seconds:

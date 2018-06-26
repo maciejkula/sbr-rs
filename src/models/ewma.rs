@@ -1,4 +1,16 @@
-//! Module for EWMA-based models.
+//! Model based on exponentially-weighted average (EWMA) of past embeddings.
+//!
+//! The model estimates three sets of parameters:
+//!
+//! - n-dimensional item embeddings
+//! - item biases (capturing item popularity), and
+//! - an n-dimensional `alpha` parameter, capturing the rate at which past interactions should be decayed.
+//!
+//! The representation of a user at time t is given by an n-dimensional vector u:
+//! ```text
+//! u_t = sigmoid(alpha) * i_{t-1} + (1.0 - sigmoid(alpha)) + i_t
+//! ```
+//! where `i_t` is the embedding of the item the user interacted with at time `t`.
 use std::sync::Arc;
 
 use rand;
@@ -27,6 +39,7 @@ fn dense_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     Arr::zeros((rows, cols)).map(|_| normal.sample(rng) as f32)
 }
 
+/// Hyperparameters describing the EWMA model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     num_items: usize,
@@ -66,7 +79,7 @@ impl Hyperparameters {
         self
     }
 
-    /// Set the l2 penalty.
+    /// Set the L2 penalty.
     pub fn l2_penalty(mut self, l2_penalty: f32) -> Self {
         self.l2_penalty = l2_penalty;
         self
@@ -182,6 +195,7 @@ impl Hyperparameters {
         }
     }
 
+    /// Build the implicit EWMA model.
     pub fn build(self) -> ImplicitEWMAModel {
         let params = self.build_params();
 
@@ -381,12 +395,14 @@ impl SequenceModel for Model {
     }
 }
 
+/// Implicit EWMA model.
 #[derive(Debug, Clone)]
 pub struct ImplicitEWMAModel {
     params: Parameters,
 }
 
 impl ImplicitEWMAModel {
+    /// Fit the EWMA model.
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, FittingError> {
         fit_sequence_model(interactions, &mut self.params)
     }
