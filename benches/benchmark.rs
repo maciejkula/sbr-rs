@@ -11,7 +11,8 @@ extern crate wyrm;
 use criterion::Criterion;
 
 use sbr::data::{Interaction, Interactions};
-use sbr::models::lstm::{Hyperparameters, Loss, Optimizer};
+use sbr::models::{ewma, lstm};
+use sbr::models::{Loss, Optimizer};
 
 fn load_movielens(path: &str, sample_size: usize) -> Interactions {
     let mut reader = csv::Reader::from_path(path).unwrap();
@@ -26,7 +27,27 @@ fn bench_lstm(c: &mut Criterion) {
     c.bench_function("lstm", |b| {
         let data = load_movielens("data.csv", 10000).to_compressed();
 
-        let mut model = Hyperparameters::new(data.num_items(), 128)
+        let mut model = lstm::Hyperparameters::new(data.num_items(), 128)
+            .embedding_dim(32)
+            .learning_rate(0.16)
+            .l2_penalty(0.0004)
+            .loss(Loss::Hinge)
+            .optimizer(Optimizer::Adagrad)
+            .num_epochs(3)
+            .num_threads(1)
+            .build();
+
+        b.iter(|| {
+            model.fit(&data).unwrap();
+        })
+    });
+}
+
+fn bench_ewma(c: &mut Criterion) {
+    c.bench_function("ewma", |b| {
+        let data = load_movielens("data.csv", 10000).to_compressed();
+
+        let mut model = ewma::Hyperparameters::new(data.num_items(), 128)
             .embedding_dim(32)
             .learning_rate(0.16)
             .l2_penalty(0.0004)
@@ -45,6 +66,6 @@ fn bench_lstm(c: &mut Criterion) {
 criterion_group!{
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_lstm
+    targets = bench_lstm, bench_ewma
 }
 criterion_main!(benches);

@@ -1,4 +1,16 @@
-//! Module for LSTM-based models.
+//! Model based on exponentially-weighted average (EWMA) of past embeddings.
+//!
+//! The model estimates three sets of parameters:
+//!
+//! - n-dimensional item embeddings
+//! - item biases (capturing item popularity), and
+//! - an n-dimensional `alpha` parameter, capturing the rate at which past interactions should be decayed.
+//!
+//! The representation of a user at time t is given by an n-dimensional vector u:
+//! ```text
+//! u_t = sigmoid(alpha) * i_{t-1} + (1.0 - sigmoid(alpha)) + i_t
+//! ```
+//! where `i_t` is the embedding of the item the user interacted with at time `t`.
 use std::sync::Arc;
 
 use rand;
@@ -9,7 +21,6 @@ use rayon;
 use ndarray::Axis;
 
 use wyrm;
-use wyrm::nn;
 use wyrm::optim::Optimizers;
 use wyrm::{Arr, BoxedNode, Variable};
 
@@ -23,17 +34,12 @@ fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     Arr::zeros((rows, cols)).map(|_| normal.sample(rng) as f32)
 }
 
-/// Type of LSTM layer to use.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum LSTMVariant {
-    /// Classic LSTM layer.
-    Normal,
-    /// A variant where the update and forget gates are coupled.
-    /// Faster to train.
-    Coupled,
+fn dense_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
+    let normal = Normal::new(0.0, (2.0 / (rows + cols) as f64).sqrt());
+    Arr::zeros((rows, cols)).map(|_| normal.sample(rng) as f32)
 }
 
-/// Hyperparameters for the [ImplicitLSTMModel].
+/// Hyperparameters describing the EWMA model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hyperparameters {
     num_items: usize,
@@ -41,7 +47,6 @@ pub struct Hyperparameters {
     item_embedding_dim: usize,
     learning_rate: f32,
     l2_penalty: f32,
-    lstm_type: LSTMVariant,
     loss: Loss,
     optimizer: Optimizer,
     parallelism: Parallelism,
@@ -59,7 +64,6 @@ impl Hyperparameters {
             item_embedding_dim: 16,
             learning_rate: 0.01,
             l2_penalty: 0.0,
-            lstm_type: LSTMVariant::Coupled,
             loss: Loss::BPR,
             optimizer: Optimizer::Adam,
             parallelism: Parallelism::Synchronous,
@@ -75,7 +79,7 @@ impl Hyperparameters {
         self
     }
 
-    /// Set the l2 penalty.
+    /// Set the L2 penalty.
     pub fn l2_penalty(mut self, l2_penalty: f32) -> Self {
         self.l2_penalty = l2_penalty;
         self
@@ -96,12 +100,6 @@ impl Hyperparameters {
     /// Set the loss function.
     pub fn loss(mut self, loss: Loss) -> Self {
         self.loss = loss;
-        self
-    }
-
-    /// Set the LSTM variant
-    pub fn lstm_variant(mut self, variant: LSTMVariant) -> Self {
-        self.lstm_type = variant;
         self
     }
 
@@ -153,11 +151,6 @@ impl Hyperparameters {
             } else {
                 Optimizer::Adagrad
             },
-            lstm_type: if Uniform::new(0.0, 1.0).sample(rng) < 0.5 {
-                LSTMVariant::Normal
-            } else {
-                LSTMVariant::Coupled
-            },
             parallelism: if Uniform::new(0.0, 1.0).sample(rng) < 0.5 {
                 Parallelism::Asynchronous
             } else {
@@ -177,25 +170,36 @@ impl Hyperparameters {
         )));
 
         let item_biases = Arc::new(wyrm::HogwildParameter::new(Arr::zeros((self.num_items, 1))));
-        let lstm_params = nn::lstm::Parameters::new(
+        let alpha = Arc::new(wyrm::HogwildParameter::new(Arr::zeros((
+            1,
+            self.item_embedding_dim,
+        ))));
+        let fc1 = Arc::new(wyrm::HogwildParameter::new(dense_init(
             self.item_embedding_dim,
             self.item_embedding_dim,
             &mut self.rng,
-        );
+        )));
+        let fc2 = Arc::new(wyrm::HogwildParameter::new(dense_init(
+            self.item_embedding_dim,
+            self.item_embedding_dim,
+            &mut self.rng,
+        )));
 
         Parameters {
             hyper: self,
             item_embedding: item_embeddings,
             item_biases: item_biases,
-            lstm: lstm_params,
+            alpha: alpha,
+            fc1: fc1,
+            fc2: fc2,
         }
     }
 
-    /// Build a model out of the chosen hyperparameters.
-    pub fn build(self) -> ImplicitLSTMModel {
-        ImplicitLSTMModel {
-            params: self.build_params(),
-        }
+    /// Build the implicit EWMA model.
+    pub fn build(self) -> ImplicitEWMAModel {
+        let params = self.build_params();
+
+        ImplicitEWMAModel { params: params }
     }
 }
 
@@ -204,7 +208,9 @@ struct Parameters {
     hyper: Hyperparameters,
     item_embedding: Arc<wyrm::HogwildParameter>,
     item_biases: Arc<wyrm::HogwildParameter>,
-    lstm: nn::lstm::Parameters,
+    alpha: Arc<wyrm::HogwildParameter>,
+    fc1: Arc<wyrm::HogwildParameter>,
+    fc2: Arc<wyrm::HogwildParameter>,
 }
 
 impl Clone for Parameters {
@@ -213,7 +219,9 @@ impl Clone for Parameters {
             hyper: self.hyper.clone(),
             item_embedding: Arc::new(self.item_embedding.as_ref().clone()),
             item_biases: Arc::new(self.item_biases.as_ref().clone()),
-            lstm: self.lstm.clone(),
+            alpha: Arc::new(self.alpha.as_ref().clone()),
+            fc1: Arc::new(self.alpha.as_ref().clone()),
+            fc2: Arc::new(self.alpha.as_ref().clone()),
         }
     }
 }
@@ -253,9 +261,10 @@ impl SequenceModelParameters for Parameters {
     fn num_epochs(&self) -> usize {
         self.hyper.num_epochs
     }
-    fn build(&self) -> Self::Output {
+    fn build(&self) -> Model {
         let item_embeddings = wyrm::ParameterNode::shared(self.item_embedding.clone());
         let item_biases = wyrm::ParameterNode::shared(self.item_biases.clone());
+        let alpha = wyrm::ParameterNode::shared(self.alpha.clone());
 
         let inputs: Vec<_> = (0..self.hyper.max_sequence_length)
             .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
@@ -288,23 +297,29 @@ impl SequenceModelParameters for Parameters {
             .map(|negative| item_biases.index(negative))
             .collect();
 
-        let layer = match self.hyper.lstm_type {
-            LSTMVariant::Normal => self.lstm.build(),
-            LSTMVariant::Coupled => self.lstm.build_coupled(),
-        };
+        let alpha = alpha.sigmoid();
+        let one_minus_alpha = 1.0 - alpha.clone();
 
-        let hidden = layer.forward(&input_embeddings);
+        let mut states = Vec::with_capacity(self.hyper.max_sequence_length);
+        let initial_state = input_embeddings.first().unwrap().clone().boxed();
+        states.push(initial_state);
+        for input in &input_embeddings[1..] {
+            let previous_state = states.last().unwrap().clone();
+            states.push(
+                (alpha.clone() * previous_state + one_minus_alpha.clone() * input.clone()).boxed(),
+            );
+        }
 
         let positive_predictions: Vec<_> =
-            izip!(hidden.iter(), output_embeddings.iter(), output_biases)
-                .map(|(hidden_state, output_embedding, output_bias)| {
-                    hidden_state.vector_dot(output_embedding) + output_bias
+            izip!(states.iter(), output_embeddings.iter(), output_biases)
+                .map(|(state, output_embedding, output_bias)| {
+                    state.vector_dot(output_embedding) + output_bias
                 })
                 .collect();
         let negative_predictions: Vec<_> =
-            izip!(hidden.iter(), negative_embeddings.iter(), negative_biases)
-                .map(|(hidden_state, negative_embedding, negative_bias)| {
-                    hidden_state.vector_dot(negative_embedding) + negative_bias
+            izip!(states.iter(), negative_embeddings.iter(), negative_biases)
+                .map(|(state, negative_embedding, negative_bias)| {
+                    state.vector_dot(negative_embedding) + negative_bias
                 })
                 .collect();
 
@@ -329,7 +344,7 @@ impl SequenceModelParameters for Parameters {
             inputs: inputs,
             outputs: outputs,
             negatives: negatives,
-            hidden_states: hidden,
+            hidden_states: states,
             summed_losses: summed_losses,
         }
     }
@@ -380,22 +395,20 @@ impl SequenceModel for Model {
     }
 }
 
-/// An LSTM-based sequence model for implicit feedback.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ImplicitLSTMModel {
+/// Implicit EWMA model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImplicitEWMAModel {
     params: Parameters,
 }
 
-impl ImplicitLSTMModel {
-    /// Fit the model.
-    ///
-    /// Returns the loss value.
+impl ImplicitEWMAModel {
+    /// Fit the EWMA model.
     pub fn fit(&mut self, interactions: &CompressedInteractions) -> Result<f32, FittingError> {
         fit_sequence_model(interactions, &mut self.params)
     }
 }
 
-impl OnlineRankingModel for ImplicitLSTMModel {
+impl OnlineRankingModel for ImplicitEWMAModel {
     type UserRepresentation = ImplicitUser;
     fn user_representation(
         &self,
@@ -453,7 +466,6 @@ mod tests {
             .embedding_dim(32)
             .learning_rate(0.16)
             .l2_penalty(0.0004)
-            .lstm_variant(LSTMVariant::Normal)
             .loss(Loss::Hinge)
             .optimizer(Optimizer::Adagrad)
             .num_epochs(10)
@@ -463,31 +475,7 @@ mod tests {
 
         let expected_mrr = match ::std::env::var("MKL_CBWR") {
             Ok(ref val) if val == "AVX" => 0.091,
-            _ => 0.081,
-        };
-
-        assert!(test_mrr > expected_mrr)
-    }
-
-    #[test]
-    fn mrr_test_two_threads() {
-        let data = download_movielens_100k().unwrap();
-
-        let hyperparameters = Hyperparameters::new(data.num_items(), 128)
-            .embedding_dim(32)
-            .learning_rate(0.16)
-            .l2_penalty(0.0004)
-            .lstm_variant(LSTMVariant::Normal)
-            .loss(Loss::Hinge)
-            .optimizer(Optimizer::Adagrad)
-            .num_epochs(10)
-            .num_threads(2);
-
-        let (test_mrr, _) = run_test(data, hyperparameters);
-
-        let expected_mrr = match ::std::env::var("MKL_CBWR") {
-            Ok(ref val) if val == "AVX" => 0.078,
-            _ => 0.074,
+            _ => 0.11,
         };
 
         assert!(test_mrr > expected_mrr)
@@ -501,7 +489,6 @@ mod tests {
             .embedding_dim(32)
             .learning_rate(0.16)
             .l2_penalty(0.0004)
-            .lstm_variant(LSTMVariant::Normal)
             .loss(Loss::WARP)
             .optimizer(Optimizer::Adagrad)
             .num_epochs(10)
@@ -511,20 +498,9 @@ mod tests {
 
         let expected_mrr = match ::std::env::var("MKL_CBWR") {
             Ok(ref val) if val == "AVX" => 0.089,
-            _ => 0.10,
+            _ => 0.14,
         };
 
         assert!(test_mrr > expected_mrr)
     }
-
-    #[test]
-    fn empty_interactions() {
-        let data = Interactions::new(100, 100).to_compressed();
-        let mut model = Hyperparameters::new(100, 100).build();
-        match model.fit(&data) {
-            Err(FittingError::NoInteractions) => {}
-            _ => panic!("No error returned."),
-        }
-    }
-
 }
