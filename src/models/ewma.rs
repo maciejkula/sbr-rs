@@ -203,7 +203,7 @@ impl Hyperparameters {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Parameters {
     hyper: Hyperparameters,
     item_embedding: Arc<wyrm::HogwildParameter>,
@@ -396,7 +396,7 @@ impl SequenceModel for Model {
 }
 
 /// Implicit EWMA model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImplicitEWMAModel {
     params: Parameters,
 }
