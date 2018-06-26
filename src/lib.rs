@@ -1,4 +1,4 @@
-#![deny(missing_docs, missing_debug_implementations)]
+// #![deny(missing_docs, missing_debug_implementations)]
 //! # sbr-rs
 //!
 //! `sbr` implements efficient recommender algorithms which operate on
@@ -29,8 +29,8 @@
 //!     .learning_rate(0.16)
 //!     .l2_penalty(0.0004)
 //!     .lstm_variant(sbr::models::lstm::LSTMVariant::Normal)
-//!     .loss(sbr::models::lstm::Loss::WARP)
-//!     .optimizer(sbr::models::lstm::Optimizer::Adagrad)
+//!     .loss(sbr::models::Loss::WARP)
+//!     .optimizer(sbr::models::Optimizer::Adagrad)
 //!     .num_epochs(10)
 //!     .rng(rng)
 //!     .build();
