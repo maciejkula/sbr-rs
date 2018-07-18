@@ -98,8 +98,8 @@ impl Interactions {
     /// Crate a new interactions object.
     pub fn new(num_users: usize, num_items: usize) -> Self {
         Interactions {
-            num_users: num_users,
-            num_items: num_items,
+            num_users,
+            num_items,
             interactions: Vec::new(),
         }
     }
@@ -116,6 +116,11 @@ impl Interactions {
     /// Give the number of contained interactions.
     pub fn len(&self) -> usize {
         self.interactions.len()
+    }
+
+    /// Check if there are no interactions.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Shuffle the interactions in-place.
@@ -192,14 +197,14 @@ impl Interactions {
 }
 
 impl From<Vec<Interaction>> for Interactions {
-    fn from(data: Vec<Interaction>) -> Interactions {
-        let num_users = data.iter().map(|x| x.user_id()).max().unwrap() + 1;
-        let num_items = data.iter().map(|x| x.item_id()).max().unwrap() + 1;
+    fn from(interactions: Vec<Interaction>) -> Interactions {
+        let num_users = interactions.iter().map(|x| x.user_id()).max().unwrap() + 1;
+        let num_items = interactions.iter().map(|x| x.item_id()).max().unwrap() + 1;
 
         Interactions {
-            num_users: num_users,
-            num_items: num_items,
-            interactions: data,
+            num_users,
+            num_items,
+            interactions,
         }
     }
 }
@@ -251,9 +256,9 @@ impl<'a> From<&'a Interactions> for CompressedInteractions {
         CompressedInteractions {
             num_users: interactions.num_users,
             num_items: interactions.num_items,
-            user_pointers: user_pointers,
-            item_ids: item_ids,
-            timestamps: timestamps,
+            user_pointers,
+            item_ids,
+            timestamps,
         }
     }
 }
@@ -277,7 +282,7 @@ impl CompressedInteractions {
         let stop = self.user_pointers[user_id + 1];
 
         Some(CompressedInteractionsUser {
-            user_id: user_id,
+            user_id,
             item_ids: &self.item_ids[start..stop],
             timestamps: &self.timestamps[start..stop],
         })
@@ -306,8 +311,8 @@ impl CompressedInteractions {
             for (&item_id, &timestamp) in izip!(user.item_ids, user.timestamps) {
                 interactions.push(Interaction {
                     user_id: user.user_id,
-                    item_id: item_id,
-                    timestamp: timestamp,
+                    item_id,
+                    timestamp,
                 });
             }
         }
@@ -317,7 +322,7 @@ impl CompressedInteractions {
         Interactions {
             num_users: self.num_users,
             num_items: self.num_items,
-            interactions: interactions,
+            interactions,
         }
     }
 }
@@ -345,17 +350,19 @@ impl<'a> CompressedInteractionsUser<'a> {
     pub fn len(&self) -> usize {
         self.item_ids.len()
     }
-    /// If there are no interactions.
+
+    /// Check if there are no interactions.
     pub fn is_empty(&self) -> bool {
         self.item_ids.is_empty()
     }
+
     /// Return a chunked iterator over interactions for this user.
     /// The chunks are such that the _first_ chunk is smallest,
     /// and the remaining chunks are all of `chunk_size`.
     pub fn chunks(&self, chunk_size: usize) -> CompressedInteractionsUserChunkIterator<'a> {
         CompressedInteractionsUserChunkIterator {
             idx: 0,
-            chunk_size: chunk_size,
+            chunk_size,
             item_ids: &self.item_ids[..],
             timestamps: &self.timestamps[..],
         }
@@ -438,13 +445,19 @@ impl TripletInteractions {
     pub fn len(&self) -> usize {
         self.user_ids.len()
     }
+
+    /// Check if there are no interactions.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Iterate over minibatches of size `minibatch_size`.
     pub fn iter_minibatch(&self, minibatch_size: usize) -> TripletMinibatchIterator {
         TripletMinibatchIterator {
             interactions: self,
             idx: 0,
             stop_idx: self.len(),
-            minibatch_size: minibatch_size,
+            minibatch_size,
         }
     }
 
@@ -511,9 +524,14 @@ pub struct TripletMinibatch<'a> {
 }
 
 impl<'a> TripletMinibatch<'a> {
-    /// Return lenght of the minibatch.
+    /// Return length of the minibatch.
     pub fn len(&self) -> usize {
         self.user_ids.len()
+    }
+
+    /// Check if there are no interactions.
+    pub fn is_empty(&self) -> bool {
+        self.item_ids.is_empty()
     }
 }
 
@@ -548,9 +566,9 @@ impl<'a> From<&'a Interactions> for TripletInteractions {
         TripletInteractions {
             num_users: interactions.num_users,
             num_items: interactions.num_items,
-            user_ids: user_ids,
-            item_ids: item_ids,
-            timestamps: timestamps,
+            user_ids,
+            item_ids,
+            timestamps,
         }
     }
 }
