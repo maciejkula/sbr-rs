@@ -5,6 +5,7 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use csv;
+use dirs;
 use failure;
 use rand;
 use rand::Rng;
@@ -21,7 +22,7 @@ pub enum DatasetError {
 }
 
 fn create_data_dir() -> Result<PathBuf, failure::Error> {
-    let path = env::home_dir()
+    let path = dirs::home_dir()
         .ok_or_else(|| DatasetError::NoHomeDir)?
         .join(".sbr-rs");
 
@@ -37,13 +38,12 @@ fn download(url: &str, dest_filename: &Path) -> Result<Interactions, failure::Er
     let desired_filename = data_dir.join(dest_filename);
 
     if !desired_filename.exists() {
-        let temp_filename = env::temp_dir().join(format!(
-            "{}",
+        let temp_filename = env::temp_dir().join(
             rand::thread_rng()
                 .sample_iter(&rand::distributions::Alphanumeric)
                 .take(10)
-                .collect::<String>()
-        ));
+                .collect::<String>(),
+        );
 
         let file = File::create(&temp_filename)?;
         let mut writer = BufWriter::new(file);

@@ -83,7 +83,7 @@ pub fn fit_sequence_model<U: SequenceModel, T: SequenceModelParameters<Output = 
         .collect();
     parameters.rng().shuffle(&mut subsequences);
 
-    if subsequences.len() == 0 {
+    if subsequences.is_empty() {
         return Err(FittingError::NoInteractions);
     }
 
@@ -150,7 +150,7 @@ pub fn fit_sequence_model<U: SequenceModel, T: SequenceModelParameters<Output = 
                     // This is because by calling forward we've added the
                     // resulting nodes to the graph.
                     if parameters.loss() == &Loss::WARP {
-                        &model.hidden_states()[loss_idx].clear();
+                        model.hidden_states()[loss_idx].clear();
                     }
 
                     let loss = &mut model.losses()[loss_idx];

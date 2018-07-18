@@ -1,4 +1,5 @@
 #![deny(missing_docs, missing_debug_implementations)]
+#![cfg_attr(feature = "cargo-clippy", allow(type_complexity))]
 //! # sbr-rs
 //!
 //! `sbr` implements efficient recommender algorithms which operate on
@@ -73,6 +74,9 @@ extern crate siphasher;
 
 #[cfg(feature = "default")]
 extern crate reqwest;
+
+#[cfg(feature = "default")]
+extern crate dirs;
 
 extern crate wyrm;
 

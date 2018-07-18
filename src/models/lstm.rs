@@ -54,8 +54,8 @@ impl Hyperparameters {
     /// Build new hyperparameters.
     pub fn new(num_items: usize, max_sequence_length: usize) -> Self {
         Hyperparameters {
-            num_items: num_items,
-            max_sequence_length: max_sequence_length,
+            num_items,
+            max_sequence_length,
             item_embedding_dim: 16,
             learning_rate: 0.01,
             l2_penalty: 0.0,
@@ -123,6 +123,7 @@ impl Hyperparameters {
         self
     }
 
+    #[allow(wrong_self_convention)]
     /// Set the random number generator from seed.
     pub fn from_seed(mut self, seed: [u8; 16]) -> Self {
         self.rng = XorShiftRng::from_seed(seed);
@@ -138,7 +139,7 @@ impl Hyperparameters {
     /// Set hyperparameters randomly: useful for hyperparameter search.
     pub fn random<R: Rng>(num_items: usize, rng: &mut R) -> Self {
         Hyperparameters {
-            num_items: num_items,
+            num_items,
             max_sequence_length: 2_usize.pow(Uniform::new(4, 8).sample(rng)),
             item_embedding_dim: 2_usize.pow(Uniform::new(4, 8).sample(rng)),
             learning_rate: (10.0_f32).powf(Uniform::new(-3.0, 0.5).sample(rng)),
@@ -186,7 +187,7 @@ impl Hyperparameters {
         Parameters {
             hyper: self,
             item_embedding: item_embeddings,
-            item_biases: item_biases,
+            item_biases,
             lstm: lstm_params,
         }
     }
@@ -258,13 +259,13 @@ impl SequenceModelParameters for Parameters {
         let item_biases = wyrm::ParameterNode::shared(self.item_biases.clone());
 
         let inputs: Vec<_> = (0..self.hyper.max_sequence_length)
-            .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
+            .map(|_| wyrm::IndexInputNode::new(&[0; 1]))
             .collect();
         let outputs: Vec<_> = (0..self.hyper.max_sequence_length)
-            .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
+            .map(|_| wyrm::IndexInputNode::new(&[0; 1]))
             .collect();
         let negatives: Vec<_> = (0..self.hyper.max_sequence_length)
-            .map(|_| wyrm::IndexInputNode::new(&vec![0; 1]))
+            .map(|_| wyrm::IndexInputNode::new(&[0; 1]))
             .collect();
 
         let input_embeddings: Vec<_> = inputs
@@ -326,11 +327,11 @@ impl SequenceModelParameters for Parameters {
         }
 
         Model {
-            inputs: inputs,
-            outputs: outputs,
-            negatives: negatives,
+            inputs,
+            outputs,
+            negatives,
             hidden_states: hidden,
-            summed_losses: summed_losses,
+            summed_losses,
         }
     }
     fn predict_single(&self, user: &[f32], item_idx: usize) -> f32 {
