@@ -11,7 +11,7 @@ use rand;
 use rand::Rng;
 use reqwest;
 
-use data::{Interaction, Interactions};
+use crate::data::{Interaction, Interactions};
 
 /// Dataset error types.
 #[derive(Debug, Fail)]
