@@ -610,9 +610,9 @@ mod tests {
         }
 
         let mut interactions = Interactions {
-            num_users: num_users,
-            num_items: num_items,
-            interactions: interactions,
+            num_users,
+            num_items,
+            interactions,
         };
         let (train, test) = user_based_split(&mut interactions, &mut rng, 0.5);
 

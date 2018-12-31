@@ -124,7 +124,7 @@ impl Hyperparameters {
         self
     }
 
-    #[allow(wrong_self_convention)]
+    #[allow(clippy::wrong_self_convention)]
     /// Set the random number generator from seed.
     pub fn from_seed(mut self, seed: [u8; 16]) -> Self {
         self.rng = XorShiftRng::from_seed(seed);

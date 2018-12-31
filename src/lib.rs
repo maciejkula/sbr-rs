@@ -1,5 +1,5 @@
 #![deny(missing_docs, missing_debug_implementations)]
-#![cfg_attr(feature = "cargo-clippy", allow(type_complexity))]
+#![cfg_attr(feature = "cargo-clippy", allow(clippy::type_complexity))]
 //! # sbr-rs
 //!
 //! `sbr` implements efficient recommender algorithms which operate on
