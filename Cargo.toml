@@ -8,6 +8,7 @@ repository = "https://github.com/maciejkula/sbr-rs"
 documentation = "https://docs.rs/sbr/"
 readme = "readme.md"
 exclude = ["data.csv"]
+editio = "2018"
 
 [badges]
 travis-ci = { repository = "maciejkula/sbr-rs", branch = "master" }
