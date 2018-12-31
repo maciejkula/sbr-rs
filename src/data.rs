@@ -7,6 +7,7 @@ use std::hash::Hasher;
 use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
 
+use serde::{Deserialize, Serialize};
 use siphasher::sip::SipHasher;
 
 use super::{ItemId, Timestamp, UserId};

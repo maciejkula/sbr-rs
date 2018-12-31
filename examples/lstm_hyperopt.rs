@@ -5,11 +5,9 @@
 extern crate csv;
 extern crate rand;
 extern crate sbr;
-extern crate wyrm;
-#[macro_use]
-extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
+extern crate wyrm;
 
 use serde::{Deserialize, Serialize};
 use std::fs::File;

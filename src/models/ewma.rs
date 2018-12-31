@@ -17,6 +17,7 @@ use rand;
 use rand::distributions::{Distribution, Normal, Uniform};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
+use serde::{Deserialize, Serialize};
 
 use ndarray::Axis;
 

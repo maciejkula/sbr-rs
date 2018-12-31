@@ -57,28 +57,15 @@
 //! );
 //! ```
 #[macro_use]
-extern crate serde_derive;
-
-#[macro_use]
 extern crate itertools;
 
 #[cfg(feature = "default")]
 extern crate csv;
 #[macro_use]
 extern crate failure;
-extern crate ndarray;
-extern crate rand;
-extern crate rayon;
-extern crate serde;
-extern crate siphasher;
-
-#[cfg(feature = "default")]
-extern crate reqwest;
 
 #[cfg(feature = "default")]
 extern crate dirs;
-
-extern crate wyrm;
 
 pub mod data;
 #[cfg(feature = "default")]
