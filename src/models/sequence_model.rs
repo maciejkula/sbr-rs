@@ -8,8 +8,8 @@ use wyrm::optim::{Optimizer as Optim, Optimizers, Synchronizable};
 use wyrm::{BoxedNode, DataInput, Variable};
 
 use super::{ImplicitUser, Loss, Parallelism};
-use data::CompressedInteractions;
-use {FittingError, ItemId, OnlineRankingModel, PredictionError};
+use crate::data::CompressedInteractions;
+use crate::{FittingError, ItemId, OnlineRankingModel, PredictionError};
 
 pub trait SequenceModelParameters {
     type Output;

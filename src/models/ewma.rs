@@ -17,6 +17,7 @@ use rand;
 use rand::distributions::{Distribution, Normal, Uniform};
 use rand::{Rng, SeedableRng, XorShiftRng};
 use rayon;
+use serde::{Deserialize, Serialize};
 
 use ndarray::Axis;
 
@@ -26,8 +27,8 @@ use wyrm::{Arr, BoxedNode, Variable};
 
 use super::sequence_model::{fit_sequence_model, SequenceModel, SequenceModelParameters};
 use super::{ImplicitUser, Loss, Optimizer, Parallelism};
-use data::CompressedInteractions;
-use {FittingError, ItemId, OnlineRankingModel, PredictionError};
+use crate::data::CompressedInteractions;
+use crate::{FittingError, ItemId, OnlineRankingModel, PredictionError};
 
 fn embedding_init<T: Rng>(rows: usize, cols: usize, rng: &mut T) -> wyrm::Arr {
     let normal = Normal::new(0.0, 1.0 / cols as f64);
@@ -121,7 +122,7 @@ impl Hyperparameters {
         self
     }
 
-    #[allow(wrong_self_convention)]
+    #[allow(clippy::wrong_self_convention)]
     /// Set the random number generator from seed.
     pub fn from_seed(mut self, seed: [u8; 16]) -> Self {
         self.rng = XorShiftRng::from_seed(seed);
@@ -432,9 +433,9 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use data::{user_based_split, Interactions};
-    use datasets::download_movielens_100k;
-    use evaluation::mrr_score;
+    use crate::data::{user_based_split, Interactions};
+    use crate::datasets::download_movielens_100k;
+    use crate::evaluation::mrr_score;
 
     fn run_test(mut data: Interactions, hyperparameters: Hyperparameters) -> (f32, f32) {
         let mut rng = rand::XorShiftRng::from_seed([42; 16]);

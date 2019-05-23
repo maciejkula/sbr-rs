@@ -1,4 +1,6 @@
 //! Models module.
+use serde::{Deserialize, Serialize};
+
 pub mod ewma;
 pub mod lstm;
 mod sequence_model;

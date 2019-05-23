@@ -3,8 +3,8 @@ use std;
 
 use rayon::prelude::*;
 
-use data::CompressedInteractions;
-use {OnlineRankingModel, PredictionError};
+use crate::data::CompressedInteractions;
+use crate::{OnlineRankingModel, PredictionError};
 
 /// Compute the MRR (mean reciprocal rank) of predictions for the last
 /// item in `test` sequences, treating all but the last one item as inputs
